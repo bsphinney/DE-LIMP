@@ -89,6 +89,11 @@ def link(out, *extra):
 
 class HowMade(unittest.TestCase):
     def setUp(self):
+        # the AI's name is read from the environment (ai_agent.agent_label): pin it
+        self._env = mock.patch.dict(os.environ, {"CLAUDECODE": "1"})
+        self._env.start()
+        os.environ.pop("ANTHROPIC_MODEL", None)
+        os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
         self._td = tempfile.TemporaryDirectory()
         self.s = self._td.name
         self.out = os.path.join(self.s, "output")
@@ -104,6 +109,7 @@ class HowMade(unittest.TestCase):
         write(os.path.join(self.out, "methods.md"), "# Methods\n")
 
     def tearDown(self):
+        self._env.stop()
         self._td.cleanup()
 
     def set_podcast(self, man, meaning_md=None):
@@ -155,11 +161,11 @@ class HowMade(unittest.TestCase):
                           "statistics", text)
             self.assertIn("tables/reproducibility_log.R", text)
             self.assertIn("re-runs the statistics as plain R code, with no AI involved", text)
-            self.assertIn("Claude, Anthropic's AI model, ran each step, following the UC Davis "
+            self.assertIn("Claude Code (Anthropic's AI coding assistant) ran each step, following the UC Davis "
                           f"Proteomics Core's pipeline (skill {version}), and wrote this "
                           "report's analysis text.", " ".join(text.split()))
             self.assertNotIn("This report was built with skill", text)
-            self.assertIn("Claude also wrote the podcast script.", text)
+            self.assertIn("also wrote the podcast script.", text)
             self.assertIn("A program checked the script's numbers and names against the report.",
                           text)
             self.assertIn("A separate Claude reviewer, not the script's writer, read every "
@@ -193,7 +199,7 @@ class HowMade(unittest.TestCase):
         write(os.path.join(figs, "figures.json"), json.dumps([{"file": "pca.png", "caption": "c"}]))
         _, _, h, m = self.build()
         for text in (h, m):
-            self.assertIn("Claude, Anthropic's AI model, ran each step", text)
+            self.assertIn("Claude Code (Anthropic's AI coding assistant) ran each step", text)
             self.assertNotIn("wrote this report", text)       # no AI-written text on this page
             self.assertIn(mah.HOW_MADE_LINK, text)
 
@@ -239,7 +245,7 @@ class HowMade(unittest.TestCase):
         _, _, h, m = self.build()
         for text in (h, m):
             self.assertNotIn("established scientific software", text)
-            self.assertIn("Claude, Anthropic's AI model", text)
+            self.assertIn("Claude Code (Anthropic's AI coding assistant)", text)
 
     def test_no_reproducibility_log_no_plain_r_sentence(self):
         os.remove(os.path.join(self.tables, "reproducibility_log.R"))
@@ -297,7 +303,7 @@ class HowMade(unittest.TestCase):
         self.set_podcast(man, mc)
         _, _, h, m = self.build()
         for text in (h, m):
-            self.assertIn("Claude also wrote the podcast script.", text)
+            self.assertIn("also wrote the podcast script.", text)
             self.assertIn("A program checked", text)
             self.assertNotIn("reviewer", text)
 
@@ -390,9 +396,8 @@ class HowMade(unittest.TestCase):
         self.assertEqual(doc.count(mp.START), 1)                    # the Listen card
         linked = raw_sections(doc, md)
         for text in linked:
-            self.assertIn("Claude also wrote the podcast script.", text)
+            self.assertIn("also wrote the podcast script.", text)
             self.assertIn("Kokoro-82M", text)
-            self.assertLess(text.index("Claude also wrote"), text.index("Separate Claude reviewers"))
             self.assertEqual(text.count(mp.MADE_START), 1)
         r = link(self.out, "--unchecked")                           # again: nothing changes
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -409,7 +414,7 @@ class HowMade(unittest.TestCase):
         empty = "<p>a</p>" + mp.MADE_START + mp.MADE_END + "<p>b</p>"
         got = mp.add_how_made(empty, self.out)
         self.assertEqual(got, "<p>a</p>" + mp.how_made_block(self.out, "html") + "<p>b</p>")
-        self.assertIn("<p>Claude also wrote the podcast script.", got)
+        self.assertIn("also wrote the podcast script.", got)
         self.assertEqual(mp.add_how_made(got, self.out), got)
         self.assertEqual(mp.add_how_made("<p>no place</p>", self.out), "<p>no place</p>")
         os.remove(os.path.join(self.out, "podcast", "podcast.json"))    # no podcast: the place
@@ -429,7 +434,7 @@ class HowMade(unittest.TestCase):
         os.utime(pdf, (1, 1))                       # older than the HTML link is about to write
         self.assertEqual(link(self.out, "--unchecked").returncode, 0)
         text = subprocess.run(["pdftotext", pdf, "-"], capture_output=True, text=True).stdout
-        self.assertIn("Claude also wrote the podcast script.", " ".join(text.split()))
+        self.assertIn("Claude Code (Anthropic's AI coding assistant) also wrote the podcast script.", " ".join(text.split()))
 
     def test_a_check_on_the_report_itself_holds_across_link_and_a_rebuild(self):
         """A podcast checked against the report's own Analysis_Report.md (references/podcast.md
@@ -457,7 +462,7 @@ class HowMade(unittest.TestCase):
         r = link(self.out)                                          # no --unchecked
         self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
         for text in raw_sections(*self.files()):
-            self.assertIn("Claude also wrote the podcast script.", text)
+            self.assertIn("also wrote the podcast script.", text)
         holds()                                                     # across link ...
         self.build()
         holds()                                                     # ... and a rebuild after it
@@ -479,14 +484,50 @@ class HowMade(unittest.TestCase):
     # -------------------------------------------------------------- the expert review
     def test_expert_review_notes_named_only_when_the_report_has_them(self):
         _, _, h, m = self.build()
-        self.assertNotIn("reviewers", m)
+        self.assertNotIn("review pass", m)
         write(os.path.join(self.out, "AI_Analysis_Report.md"),
               REPORT + "\n## Expert Review Notes\n\nThe review checked the names.\n")
+        for lens in ("proteomics", "biology", "statistics"):
+            write(os.path.join(self.s, "logs", f"review_{lens}.md"), "- note\n")
         _, _, h, m = self.build()
         for text in (h, m):
-            self.assertIn("Separate Claude reviewers — a proteomics expert, a biologist and a "
-                          "statistician — checked the analysis; their notes are in the Expert "
-                          "Review Notes section.", " ".join(text.split()))
+            self.assertIn("3 separate AI review passes (proteomics, biology and statistics) "
+                          "checked the analysis; their notes are in the Expert Review Notes "
+                          "section.", " ".join(text.split()))
+
+    def test_the_review_sentence_needs_the_review_files_not_just_the_heading(self):
+        write(os.path.join(self.out, "AI_Analysis_Report.md"),
+              REPORT + "\n## Expert Review Notes\n\nThe review checked the names.\n")
+        _, _, h, m = self.build()                       # heading, no review file on record
+        for text in (h, m):
+            self.assertNotIn("review pass", text)
+            self.assertNotIn("reviewers", text)
+
+    def test_only_the_reviews_that_ran_are_named(self):
+        write(os.path.join(self.out, "AI_Analysis_Report.md"),
+              REPORT + "\n## Expert Review Notes\n\nThe review checked the names.\n")
+        write(os.path.join(self.s, "logs", "review_statistics.md"), "- note\n")
+        write(os.path.join(self.s, "logs", "review_biology.md"), "")          # empty: not counted
+        _, _, h, m = self.build()
+        flat = " ".join(m.split())
+        self.assertIn("1 separate AI review pass (statistics) checked the analysis", flat)
+        self.assertNotIn("biology", flat)
+
+    # -------------------------------------------------------------- who ran it
+    def test_the_assistant_is_named_from_the_environment_never_assumed(self):
+        os.environ.pop("CLAUDECODE")
+        _, _, _, m = self.build()
+        self.assertIn("An AI assistant ran each step", m)
+        self.assertNotIn("Claude", m)
+        os.environ["CLAUDECODE"] = "1"
+        os.environ["ANTHROPIC_MODEL"] = "model-x"
+        _, _, _, m = self.build()
+        self.assertIn("(Anthropic's AI coding assistant, model model-x) ran each step", m)
+
+    def test_a_recorded_agent_in_session_json_wins(self):
+        write(os.path.join(self.s, "session.json"), json.dumps({"ai_agent": "Some Agent 3"}))
+        _, _, _, m = self.build()
+        self.assertIn("Some Agent 3 ran each step", m)
 
     # -------------------------------------------------------------- the report's own wins
     def test_the_reports_own_section_of_that_title_wins(self):
@@ -503,7 +544,7 @@ class HowMade(unittest.TestCase):
         r = link(self.out, "--unchecked")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("no place for podcast paragraph of How this report was made", r.stdout)
-        self.assertNotIn("Claude also wrote", "".join(self.files()))
+        self.assertNotIn("Claude Code (Anthropic's AI coding assistant) also wrote", "".join(self.files()))
 
     def test_the_writer_is_told_to_leave_the_section_to_the_tool(self):
         src = read(os.path.join(SCRIPTS, "analysis_prompt.py"))

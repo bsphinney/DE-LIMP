@@ -1,7 +1,7 @@
 {
   "name": "ucdavis-proteomics-core-pipeline",
-  "version": "2.15.0",
-  "description": "UC Davis Proteomics Core pipeline \u2014 end-to-end proteomics search + differential expression from raw mass-spec data. Detects DIA/DDA + instrument, auto-installs the toolchain, runs DIA-NN (DIA), FragPipe or Sage (DDA) with data-derived parameters, then limpa/limma DE \u2014 with a written analysis report, full reproducibility bundle, and tidy session packaging.",
+  "version": "2.15.1",
+  "description": "UC Davis Proteomics Core pipeline \u2014 end-to-end proteomics search + differential expression from raw mass-spec data. Detects DIA/DDA + instrument, auto-installs a pinned toolchain, and searches with data-derived parameters: DIA data with DIA-NN; DDA data with Sage (ordinary tryptic Orbitrap) or FragPipe (timsTOF DDA-PASEF and non-specific-enzyme DDA); Radiant or FragPipe's DIA route on request. Then limpa/limma DE, with a written analysis report, full reproducibility bundle, and tidy session packaging. Defaults are derived locally from the data; nothing is downloaded as a workflow at run time.",
   "author": {
     "name": "Brett Phinney",
     "email": "bsphinney@ucdavis.edu",

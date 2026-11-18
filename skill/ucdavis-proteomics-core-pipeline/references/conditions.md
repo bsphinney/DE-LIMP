@@ -10,11 +10,11 @@ genuine ambiguities.
 - 52: The Core LIMS sample sheet
 - 80: A run whose file name holds `--`
 - 91: How mapping works (`collect_conditions.py --map`)
-- 130: The finished metadata
-- 162: Why deterministic matching (not pure LLM)
-- 169: Less-used flags
-- 174: Step 3: collecting the conditions and settling every ambiguity
-- 235: Step 8: check the design against the report; runs left out of the DE
+- 134: The finished metadata
+- 166: Why deterministic matching (not pure LLM)
+- 173: Less-used flags
+- 178: Step 3: collecting the conditions and settling every ambiguity
+- 256: Step 8: check the design against the report; runs left out of the DE
 <!-- /contents -->
 
 ## Two ways the user provides conditions
@@ -122,7 +122,11 @@ It then reports, for confirmation:
   `<csv>.decisions.json`, which `provenance.py` copies beside the CSV. One sample: name its run
   in the mapping. Two samples sharing a label: map each by something only its run carries.
 - `singleton_groups` — a group with <2 replicates → no within-group variance, so
-  no DE for it. Warn.
+  no DE for it. Tell the user before the compute confirmation. When other groups have
+  replicates (3 + 3 + 1), the way forward is theirs, recorded with `log_decision.py`: leave that
+  group's run(s) out of the DE (no row in `conditions.csv`; `--exclude` with their reason at
+  step 8) and test the replicated groups, or take the no-DE route (`no-de-route.md`). Never run
+  the DE past `--validate`'s or the audit's FAIL.
 
 The agent confirms each with the user, finalizes `conditions.csv`, then runs
 `--validate` against the search report before DE.
@@ -213,11 +217,28 @@ so `--validate` refuses the CSV: re-run `--map` with `--confirm-multi '<label>'`
 says the label names every one of its runs (a group label such as `ctrl`), or with a mapping
 that names the one run. The answer is recorded in `<csv>.decisions.json` (copied with the CSV
 by `provenance.py`); also log it (`log_decision.py`). Do **not** start a search while any run is
-unassigned, conflicting or awaiting a decision. A subject column (Mouse, Animal, Subject, Patient, Donor…) whose values look
+unassigned, conflicting or awaiting a decision.
+
+**Two questions every design gets, outside CoreOmics too** (ask them with the conditions, before
+the compute confirmation):
+- **"Are any runs repeat injections of the same sample?"** Re-injections are technical
+  replicates: never count them as separate samples. Name each run's biological sample in the
+  mapping with the `technical_replicates` key, `{"technical_replicates": {"<run>": "<sample>",
+  ...}}` beside `groups` or `mapping` in `--mapping-json` (a file the user gave: build that JSON
+  from it). `--map` writes the sample into the `Sample` column and reports it under
+  `technical_replicates`; `run_de.R` then blocks on that column (a random effect), so the
+  injections are never counted as n. A label that names two runs (`multi_match_identifiers`) is
+  this question too: `--confirm-multi` makes both runs group members, so use it only when they
+  are different samples. Core submissions answer it at `locate` (`--reinjections`,
+  core-submissions.md).
+- **"Did several samples come from the same animal, patient or donor (paired samples)?"** If so,
+  name that unit (`subjects` in the mapping, or the subject column of their file).
+
+A subject column (Mouse, Animal, Subject, Patient, Donor…) whose values look
 like subjects (≥ 3, not the groups relabelled, and recurring across groups where they span
-groups) is kept under its
-own name; when the output has `"block_suggested": true`, run DE with
-`--block <block_column>` (step 8). A subject-named column whose values do not (Subject =
+groups) is kept under its own name. `"block_suggested": true` is a prompt for the paired
+question above, never a decision: ask, and run DE with `--block <block_column>` (step 8) only
+when the user confirms the samples are paired. A subject-named column whose values do not (Subject =
 M/F, Patient = Yes/No) stays a covariate and comes back as `subject_ambiguous` — ask, and
 re-run with `--subject-column <header>` only if the user confirms it. A condition column that
 names each **replicate** (the LIMS `condition_name`: `X_mix_1` … `X_mix_5`) is read as conditions

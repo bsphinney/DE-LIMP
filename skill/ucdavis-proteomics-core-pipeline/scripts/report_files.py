@@ -33,7 +33,8 @@ SHARE_STALE = "Analysis_Report_with_audio.stale.html"
 # tests/test_de_output_names.py reads the R scripts against this list.
 DE_RECORD = "de_provenance.json"                  # run_de.R's record: a session with one has a DE
 DE_OUTPUT_NAMES = frozenset((
-    DE_RECORD, "Expression_Matrix.csv", "Detection_Matrix.csv", "methods.txt", "sessionInfo.txt",
+    DE_RECORD, "Expression_Matrix.csv", "Detection_Matrix.csv", "OnOff_Proteins.csv", "QuantUMS_tradeoff.csv",
+    "methods.txt", "sessionInfo.txt",
     "reproducibility_log.R", "set_test_inputs.rds", "DE-LIMP_session.rds",
     "QC_detected_vs_inferred.csv", "QC_contaminant_share.csv", "contaminants_removed.csv",
     "sets_members.csv", "sets_methods.txt", "sets_provenance.json",

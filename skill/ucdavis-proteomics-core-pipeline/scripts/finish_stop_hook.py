@@ -14,9 +14,13 @@ A plugin hook runs in EVERY Claude Code session of a user who has the plugin, so
 and instant (exit 0, no output) unless ALL of these hold:
   * stop_hook_active is not true (Claude Code sets it when it is already continuing because a
     Stop hook blocked: never loop);
-  * this Claude Code session (session_id) ran a local analysis session -- the map session.py
-    init / checkpoint.py / save_transcript.py record (save_transcript.lookup), as
-    transcript_hook.py reads it;
+  * this Claude Code session (session_id) ran a LOCAL analysis session -- a session whose folder is on
+    HIVE (every CoreOmics submission, hive_remote) is NOT checked: reading it means an ssh call,
+    which a hook with a time budget must not make (a dead VPN would hang the turn's end). hooks.json
+    says so, and for those sessions SKILL.md rule 16 puts the check on the agent: `session.py status`
+    over hive_exec.sh. Audit 2026-11-17 (lane 4, M3): the hook used to read as a safety net for all
+    of them. The sessions it does check are those in the map session.py init / checkpoint.py /
+    save_transcript.py record (save_transcript.lookup), as transcript_hook.py reads it;
   * that session has produced results (a search or DE output): a conversation still gathering
     conditions is not "ending without finalizing";
   * no person's hold is recorded (`session.py hold`: finish_hold) -- a stop/pause/abandon is
@@ -100,7 +104,7 @@ def reminder(payload):
     for entry in st.lookup(sid):
         sdir = entry.get("session_dir")
         if entry.get("hive") or not sdir or not os.path.isdir(sdir):
-            continue                                    # a HIVE session: checked there, not here
+            continue                                    # a HIVE session: NOT checked (see the header)
         if session.finish_hold(sdir) or not session.has_results(sdir):
             continue
         missing = [i for i in session.finish_status(sdir) if not i["done"]]

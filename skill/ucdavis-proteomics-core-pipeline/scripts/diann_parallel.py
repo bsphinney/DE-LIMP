@@ -137,7 +137,9 @@ PROBE_RETRY_MIN_S = 900
 SCAN_WINDOW_MODES = {
     "measured": "measured on these runs by step 1b and pinned for every step (set at generation, "
                 "as the plan; replaced by fallback_auto if the measurement fails)",
-    "fallback_auto": "step 1b's measurement failed; DIA-NN chose the radius itself, per run",
+    "fallback_auto": "step 1b's measurement failed; DIA-NN chose the radius itself, per run "
+                     "(written by skill 2.15.0 and earlier only: from 2.15.1 a failed window "
+                     "probe stops the chain instead)",
     "pinned": "given in the cfg and passed to every step",
     "auto": "not set, by design (single-shot search, DDA): DIA-NN chose the radius itself",
     "invalid": "the cfg passes a --window that is not one positive integer, 0 included (see "
@@ -159,8 +161,8 @@ MASS_ACC_MODES = {
                "negative, not a number, or set twice with different values",
     "unknown": "the cfg could not be read"}
 
-# probe_fallback.py's record, beside window.txt / massacc.txt: steps 2-5 accept window.txt `auto`
-# only with it (needs_measured)
+# probe_fallback.py's record, beside massacc.txt (a mass-accuracy fallback). Skill <= 2.15.0 also
+# wrote it for a window fallback; steps 2-5 now refuse that `auto` (needs_measured)
 FALLBACK_RECORD = "probe_fallback.json"
 # What a pre-search probe leaves in <out> -- step 1b's, or the single-shot search's
 PROBE_OUTPUTS = ("window.txt", "massacc.txt", "window.json", "window.json.attempt1",
@@ -228,9 +230,11 @@ def set_aside_probe_outputs(out):
 # What the search runs with when it did not measure (probe_fallback.py writes it), as the plan
 # records it at generation.
 FALLBACK_PLAN = {
-    "window": "retried once; if it still measures nothing, window.txt says `auto`, steps 2-5 pass "
-              "no --window and DIA-NN chooses the radius itself, per run -- recorded as a "
-              "fallback (search_provenance.json probe_fallback), never as measured",
+    "window": "retried once; if it still measures nothing, step 1b FAILS and steps 2-5 never "
+              "start. There is no window fallback: with no --window each array task's DIA-NN "
+              "would choose its own radius, and steps 3 and 5 would then reuse .quant files made "
+              "under different windows, which DIA-NN strongly advises against (audit "
+              "2026-11-17, lane 1 #4). Skill 2.15.0 and earlier fell back to `auto` here",
     "mass-acc": "retried once; if it still measures nothing, the documented level as given and "
                 "the other at the facility SOP, tagged DEFAULT -- recorded as a fallback "
                 "(search_provenance.json probe_fallback), never as measured"}
@@ -694,10 +698,16 @@ def window_record(ma):
     if st == "unset" and ma.get("dda"):
         return {"mode": "auto", "source": DDA_WINDOW_NOTE, "value": None, "passed": []}
     if st == "unset":
+        # Within one multi-file DIA-NN run its README says it optimises on the FIRST run and
+        # reuses that for the others, so "the analysis results will depend on which run is first
+        # in the list" (audit 2026-11-17, lane 1 #9: said here rather than probed, for now).
         return {"mode": "auto",
-                "source": "not in the cfg -- DIA-NN chooses the radius itself (on the 18-file "
-                          "poplar chain it chose per file: 7 for seventeen, 8 for one; how it "
-                          "chooses within one multi-file search is unverified)",
+                "source": "not in the cfg -- DIA-NN chooses the radius itself. In one multi-file "
+                          "search it optimises it on the first run in the list and reuses it "
+                          "for the others, so results can depend on file order (DIA-NN "
+                          "README, 'LC-MS-specific parameters'); when each file is its own "
+                          "DIA-NN run it chooses per file (the 18-file poplar chain: 7 for "
+                          "seventeen, 8 for one)",
                 "value": None, "passed": []}
     if st == "zero":
         # not `auto`: the flag IS set, to a value DIA-NN itself rejects (SCAN_WINDOW_MODES)
@@ -829,9 +839,9 @@ def mass_acc_dda_refusal(cfg):
 
 
 def window_flag(path):
-    """Bash for the --window steps 2-5 pass: `--window N` from `path`, or nothing when it says
-    `auto` (the probe's fallback: DIA-NN chooses the radius per run). needs_measured() has
-    already refused anything else, a missing file included."""
+    """Bash for the --window steps 2-5 pass: `--window N` from `path`. needs_measured() has
+    already refused anything else -- a missing file, and the `auto` skill 2.15.0's window
+    fallback wrote, included."""
     return f"$(sed -n 's/^\\([1-9][0-9]*\\)$/--window \\1/p' \"{path}\") "
 
 
@@ -863,7 +873,8 @@ def probe_failure_lines(indent="  "):
 
 
 def probe_attempts(head, tail, evidence, measure, documented, reset, window_file=None,
-                   massacc_file=None, write_cfg=None, provenance=None, fallback_out=None):
+                   massacc_file=None, write_cfg=None, provenance=None, fallback_out=None,
+                   fallback=True):
     """Bash that runs the probe, runs it ONCE more when its own machinery failed, and then falls
     back (probe_fallback.py) instead of failing the search -- only then. The one definition, for
     the chain's step 1b and the single-shot search's probe.
@@ -884,7 +895,11 @@ def probe_attempts(head, tail, evidence, measure, documented, reset, window_file
     `head` is the probe's command up to (not including) `--budget`; `tail` the DIA-NN flags
     after `--`. `reset` clears an attempt's leftovers before the retry. Afterwards PROBE_RC is
     the probe's last exit status and PROBE_FALLBACK is 1 when the fallback was written. Safe
-    under `set -e` (the single-shot inline route runs these lines with it)."""
+    under `set -e` (the single-shot inline route runs these lines with it).
+
+    `fallback=False`: retried as above, but never fallen back past -- PROBE_FALLBACK stays 0
+    and the caller fails. The chain passes it whenever it measures the scan window
+    (window_fallback_allowed()): there is no safe window fallback."""
     q = shlex.quote
     fb = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe_fallback.py")
     doc = f" {probe_mass_acc_args(documented)}" if documented else ""
@@ -908,12 +923,26 @@ def probe_attempts(head, tail, evidence, measure, documented, reset, window_file
         f"  {head} --budget $PROBE_BUDGET -- {tail} > {q(evidence)} && PROBE_RC=0 || PROBE_RC=$?",
         f'  case "$PROBE_RC" in {_rc_case(RETRY_ON)}) ;; *) break ;; esac',
         "done",
+    ] + ([] if not fallback else [
         f'case "$PROBE_RC" in {_rc_case(FALLBACK_ON)})',
         f"  if python3 {q(fb)} --measure {' '.join(measure)}{doc} --exit-code $PROBE_RC "
         f"--attempts $PROBE_ATTEMPTS --evidence {q(evidence)}{opt}"
         + (f" --out {q(fallback_out)}" if fallback_out else "") + "; then PROBE_FALLBACK=1; fi ;;",
         "esac",
-    ]
+    ])
+
+
+def window_fallback_allowed(measure):
+    """May a probe that measured nothing fall back (probe_fallback.py) instead of failing?
+
+    Not when it was measuring the scan window. The old fallback left window.txt `auto`, so each
+    array task's DIA-NN chose its own radius in steps 2 and 4, and steps 3 and 5 reused those
+    .quant files. DIA-NN's README: "it is strongly recommended to only reuse .quant files when
+    both mass accuracies and the scan window are fixed to specific values"; 2.7.0 prints the
+    same warning. No radius can be chosen without measuring it, so the chain stops and says how
+    to recover (audit 2026-11-17, lane 1 #4). A mass-accuracy-only probe still falls back: its
+    fallback pins one documented/SOP value for every step."""
+    return "window" not in measure
 
 
 def probe_mass_acc_args(documented):
@@ -925,7 +954,7 @@ def probe_mass_acc_args(documented):
 def documented_levels_text(documented):
     """The levels a plan pins as given, for a verdict or a provenance record. "Documented" here
     means a value from DIA-NN's Orbitrap resolution table -- an exact tier, OR interpolated between
-    tiers (MS1 at 90k gives 7.5 ppm) -- so the text must not call it a README value: it said
+    tiers (MS1 at 90k gives 8.1 ppm) -- so the text must not call it a README value: it said
     "--mass-acc-ms1 7.5 as documented". The cfg's rationale sidecar names which each level is."""
     return (", ".join(f"{f} {v:g}" for f, v in sorted(documented.items()))
             + " from DIA-NN's Orbitrap resolution table (an exact tier, or interpolated between "
@@ -936,9 +965,8 @@ def documented_levels_text(documented):
 # It checks the SHAPE of the line -- the two flags, in order, each with a number. A shape check
 # cannot tell 14 ppm from 999999, so massacc.txt gets massacc_band_check() as well.
 MEASURED_FILE_RE = {
-    # a radius. `auto` (probe_fallback.py: DIA-NN chooses per run, and steps 2-5 pass no
-    # --window -- window_flag()) is accepted by needs_measured() only beside the fallback's own
-    # record, never on its own
+    # a radius, and nothing else: `auto` (skill <= 2.15.0's window fallback) is refused
+    # (window_fallback_allowed())
     "window.txt": "[1-9][0-9]*",
     "massacc.txt": "--mass-acc [0-9]*[.]?[0-9]+ --mass-acc-ms1 [0-9]*[.]?[0-9]+",
 }
@@ -967,7 +995,7 @@ def needs_measured(path, what, producer="step 1b (step1b_window.sbatch)"):
     """Bash that fails the job unless step 1b's `path` holds a measurement.
 
     Steps 2-5 splice `$(cat massacc.txt)` and `--window N` from window.txt (window_flag();
-    nothing for the fallback's `auto`) into DIA-NN's command line. A missing file expands to NOTHING: DIA-NN then optimises mass accuracy per file -- the
+    never `auto`) into DIA-NN's command line. A missing file expands to NOTHING: DIA-NN then optimises mass accuracy per file -- the
     very thing the chain exists to prevent -- and still writes its .quant, so must_exist passes
     and steps 3/5 stitch auto-calibrated passes together. That is not hypothetical: step 1b
     deletes both files before it probes, and references/watcher.md tells the orchestrator to
@@ -977,13 +1005,9 @@ def needs_measured(path, what, producer="step 1b (step1b_window.sbatch)"):
     base = os.path.basename(path)
     pat = MEASURED_FILE_RE[base]
     ok = f'grep -Eqx -- {shlex.quote(pat)} "{path}" 2>/dev/null'
-    if base == "window.txt":
-        # `auto` only with probe_fallback.py's record of a window fallback beside it: a
-        # hand-written or stale `auto` must not make steps 2-5 run without a window unrecorded
-        fb = os.path.join(os.path.dirname(path), FALLBACK_RECORD)
-        marker = shlex.quote('"mode": "fallback_auto"')
-        ok = (f'{{ {ok} || {{ grep -qx auto "{path}" 2>/dev/null && '
-              f'grep -q {marker} "{fb}" 2>/dev/null; }}; }}')
+    # window.txt `auto` (skill <= 2.15.0's window fallback) is refused like any other non-radius,
+    # even beside its probe_fallback.json: steps 2-5 never run without one pinned radius
+    # (window_fallback_allowed(); audit 2026-11-17, lane 1 #4).
     shape = (f'if ! {ok}; then '
              f'echo "FAILED: {path} does not hold {what} -- {producer} measures '
              f'it and has not completed successfully. Re-run it first; running DIA-NN '
@@ -1195,6 +1219,28 @@ def parallel_safe(cfg, probe_window=True, seed_lib=None):
 # leaves no .quant, and step 5 then builds the cross-run report from the survivors and
 # calls it done -- a silently DROPPED SAMPLE. Exit status is therefore not trustworthy;
 # every step must assert that the artefact it was supposed to produce actually exists.
+#
+# The converse holds too: a NON-zero exit is always a failure, whatever was left on disk. A
+# DIA-NN that segfaults, is killed or whose container fails can leave a partial .quant or
+# library behind, and the file test alone then passed it (audit 2026-11-17, lane 5 #1: a stand-in
+# engine that wrote 7 bytes and exited 139 left a COMPLETED step 2). So every chain step runs
+# DIA-NN through engine_call(): the status is read first, then must_exist() checks the artefact.
+# No non-zero status is tolerated -- none of DIA-NN's outcomes is "non-zero but usable".
+def engine_call(command_lines, artefact, what):
+    """Bash that runs DIA-NN (`command_lines`: one command, `\\`-continued over lines) and fails
+    the job when it exits non-zero. The partial `artefact` it may have left is deleted, so no
+    later step -- nor a step resubmitted by hand -- can pick it up. The job exits 1, never
+    DIA-NN's own code: 75 is node_fault's "this node is bad", and a crash is not that."""
+    lines = list(command_lines)
+    lines[-1] = lines[-1] + " || DIANN_RC=$?"
+    return (["DIANN_RC=0"] + lines
+            + [f'if [ "$DIANN_RC" -ne 0 ]; then '
+               f'echo "FAILED: DIA-NN exited with status $DIANN_RC while writing {what} -- a '
+               f'crash, a kill or a container error. Whatever it left at {artefact} is not '
+               f'trusted and was deleted. Check the log above for ERROR:, then resubmit this '
+               f'step." >&2; rm -f -- "{artefact}"; exit 1; fi'])
+
+
 def must_exist(path, what):
     """Bash that fails the job unless `path` exists and is non-empty."""
     return (f'if [ ! -s "{path}" ]; then '
@@ -1567,9 +1613,14 @@ def needs_requeue(partition, qos):
     return (qos or "").startswith("public") or partition == "low"
 
 
-def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None, exclude=None):
+def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None, exclude=None,
+           log_dir=None):
     """A chain step's #SBATCH lines. `exclude`: the nodes --exclude keeps every step off
-    (node_fault.exclude_nodes)."""
+    (node_fault.exclude_nodes). `log_dir`: the search folder, so the log lands there however the
+    step is submitted. A relative `-o` is resolved against sbatch's working directory: a step
+    resubmitted by path from $HOME (references/watcher.md, hive_exec.sh) wrote its log to $HOME,
+    where the watcher never looks (audit 2026-11-17, lane 5 #16). Same rule as
+    run_search.emit_sbatch."""
     h = ["#!/bin/bash -l",
          f"#SBATCH --job-name={name}",
          f"#SBATCH --cpus-per-task={cpus}",
@@ -1584,7 +1635,8 @@ def header(name, cpus, mem_gb, hours, partition, account, qos=None, array=None, 
         h.append(exclude_directive(exclude))
     if needs_requeue(partition, qos):
         h.append("#SBATCH --requeue")
-    h += [f"#SBATCH -o {name}_%j.log", f"#SBATCH -e {name}_%j.log"]
+    log = os.path.join(os.path.abspath(log_dir), f"{name}_%j.log") if log_dir else f"{name}_%j.log"
+    h += [f'#SBATCH -o "{log}"', f'#SBATCH -e "{log}"']
     if array:
         h.insert(2, f"#SBATCH --array={array}")
         h = [x.replace("_%j.log", "_%A_%a.log") for x in h]
@@ -1929,12 +1981,14 @@ def main():
     if not seed:
         s1 = write("step1_libpred.sbatch", "\n".join([
             header("s1_libpred", a.libpred_cpus, a.libpred_mem, a.libpred_time, _ps, _as_, qos=_qs,
-                   exclude=a.exclude_nodes), "",
+                   exclude=a.exclude_nodes, log_dir=out), "",
             f'echo "Step 1/5 library prediction"; date',
             clear_stale(predicted),       # see clear_stale(): a re-run must not pass on the old one
-            f'{DN} --fasta "{fasta}" --fasta-search --predictor --gen-spec-lib \\',
-            f'  --out-lib "{step1_lib}" --out "{D}/step1_lib.parquet" \\',
-            f'  --threads {a.libpred_cpus} {flags}',
+            *engine_call([
+                f'{DN} --fasta "{fasta}" --fasta-search --predictor --gen-spec-lib \\',
+                f'  --out-lib "{step1_lib}" --out "{D}/step1_lib.parquet" \\',
+                f'  --threads {a.libpred_cpus} {flags}'],
+                predicted, "the predicted spectral library"),
             must_exist(predicted, "the predicted spectral library")]),
             stage="step 1/5 library prediction", hours=a.libpred_time)
 
@@ -1984,7 +2038,7 @@ def main():
                                 if m in measure)
         s1b = write("step1b_window.sbatch", "\n".join([
             header("s1b_window", probe_cpus, task_memory(a)[0], PROBE_WALL_HOURS,
-                   _ps, _as_, qos=_qs, exclude=a.exclude_nodes), "",
+                   _ps, _as_, qos=_qs, exclude=a.exclude_nodes, log_dir=out), "",
             f'echo "Step 1b/5 measuring {what} on representative runs"; date',
             # Every other step reaches DIA-NN through DN, which carries the .NET 8 exports a
             # Thermo .raw needs. probe_window.py runs DIA-NN as its own subprocess (no shell),
@@ -2026,7 +2080,29 @@ def main():
                 window_file=wtxt if "window" in measure else None,
                 massacc_file=mtxt if mess else None, write_cfg=tmp_cfg,
                 provenance=f"{D}/search_provenance.json",
-                fallback_out=f"{D}/{FALLBACK_RECORD}"),
+                fallback_out=f"{D}/{FALLBACK_RECORD}",
+                fallback=window_fallback_allowed(measure)),
+            # A window probe whose own machinery failed twice (or timed out) stops HERE, with
+            # its own message: the generic one below says "did not fall back (only a failure of
+            # the probe's own machinery may)", which is not why.
+            *([f'case "$PROBE_RC" in {_rc_case(FALLBACK_ON)})',
+               f'  echo "FAILED: step 1b could not measure the scan-window radius: the probe\'s '
+               f'own machinery failed (exit $PROBE_RC, after $PROBE_ATTEMPTS attempt(s) -- an '
+               f'unreadable log, a crash or its time limit; details above and in '
+               f'{D}/window.json). The search stops here on purpose. Without one measured '
+               f'radius every run would choose its own window, and steps 3 and 5 would combine '
+               f'.quant files made under different windows, which DIA-NN strongly advises '
+               f'against." >&2',
+               '  echo "Steps 2-5 were submitted afterok on THIS job, so they are now PENDING '
+               'with DependencyNeverSatisfied and will never start." >&2',
+               f'  echo "Recover: this is usually a passing storage or node problem. scancel '
+               f'steps 2-5 (ids in {D}/jobs.txt) and re-run submit.sh, or resubmit '
+               f'step1b_window.sbatch and steps 2-5 chained afterok on the new ids. If it fails '
+               f'again, pin --window N in the cfg (a radius measured on an earlier search with '
+               f'the same LC method, recorded in its window.json) and regenerate the search. '
+               f'Do NOT guess a radius. See references/watcher.md (dependency_failed)." >&2',
+               f'  rm -f {q(tmp_cfg)} "{wtxt}"' + (f' "{mtxt}"' if mess else "") + "; exit 1 ;;",
+               "esac"] if not window_fallback_allowed(measure) else []),
             'if [ "$PROBE_RC" -eq 0 ]; then',
             *(['  W=$(python3 -c "import json,sys; w=json.load(open(sys.argv[1]))[\'window_radius\']; '
                f'assert isinstance(w, int) and w > 0; print(w)" "{D}/window.json")']
@@ -2085,10 +2161,9 @@ def main():
             f'place from {tmp_cfg} (disk full? permissions?)" >&2',
             "  exit 1",
             "fi",
+            # (a window probe never gets here on a fallback: window_fallback_allowed())
             'if [ "$PROBE_FALLBACK" -eq 1 ]; then',
-            *(['  echo "scan window = auto -- FALLBACK: the probe measured nothing, so DIA-NN '
-               'chooses the radius itself, per run (search_provenance.json probe_fallback)"']
-              if "window" in measure else []),
+            "  :   # bash needs a command here when there is no mass-accuracy line",
             *(['  echo "mass accuracy = $M -- FALLBACK: the documented level as given, the other '
                'at the facility SOP (DEFAULT, not measured)"'] if mess else []),
             'else',
@@ -2120,33 +2195,40 @@ def main():
     # Step 2 — first pass (array): predicted lib -> per-file .quant
     s2 = write("step2_firstpass.sbatch", "\n".join([
         header("s2_firstpass", a.threads_per_file, task_memory(a)[0], a.time_per_file, _pa, _aa, qos=_qa, array=array,
-               exclude=a.exclude_nodes), "",
+               exclude=a.exclude_nodes, log_dir=out), "",
         f'echo "Step 2/5 first pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         *measured_guard, pick, tmpguard("quant_step2"),
         f'mkdir -p "{D}/{TASK_OUT_DIRS["step2"]}"   # this task\'s report files (TASK_OUT_DIRS)',
         'QOUT="${FILE##*/}"; QOUT="${QOUT%.*}.quant"',
         clear_stale(f'{D}/quant_step2/$QOUT'),
-        f'{DN} --f "$FILE" --fasta "{fasta}" --lib "{predicted}" \\',
-        f'  --temp "{D}/quant_step2" --rt-profiling --gen-spec-lib --quant-ori-names \\',
-        f'  --out "{D}/{TASK_OUT_DIRS["step2"]}/t${{SLURM_ARRAY_TASK_ID}}.parquet" \\',
-        f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
+        *engine_call([
+            f'{DN} --f "$FILE" --fasta "{fasta}" --lib "{predicted}" \\',
+            f'  --temp "{D}/quant_step2" --rt-profiling --gen-spec-lib --quant-ori-names \\',
+            f'  --out "{D}/{TASK_OUT_DIRS["step2"]}/t${{SLURM_ARRAY_TASK_ID}}.parquet" \\',
+            f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}'],
+            f'{D}/quant_step2/$QOUT', "this file's .quant"),
         must_exist(f'{D}/quant_step2/$QOUT', "this file's .quant")]),
         stage="step 2/5 first pass (array)", hours=a.time_per_file)
 
     # Step 3 — empirical library assembly (single job, --use-quant)
     s3 = write("step3_assembly.sbatch", "\n".join([
         header("s3_assembly", a.s3_cpus, a.s3_mem, a.s3_time, _ps, _as_, qos=_qs,
-               exclude=a.exclude_nodes), "",
+               exclude=a.exclude_nodes, log_dir=out), "",
         f'echo "Step 3/5 empirical library assembly"; date', *measured_guard,
         tmpguard("quant_step2"),
-        f'cp -r "{D}/quant_step2" "{D}/quant_step2_orig" 2>/dev/null || true   # backup for resume',
+        # No copy of quant_step2 is made here any more: nothing ever read the old
+        # quant_step2_orig "backup", and a second run of this step nested it inside itself
+        # (audit 2026-11-17, lane 5 #10). A lost or damaged step-2 .quant is recovered by
+        # resubmitting that step-2 task, which is what references/watcher.md says to do.
         # the first-pass report and its stats too: step 5 compares them with its own
         # (pass_comparison.py), and a previous run's must not stand in for this one's
         clear_stale(empirical, first_pass, stats_path(first_pass)),
-        f'{DN} {all_f} --fasta "{fasta}" --lib "{predicted}" --use-quant --quant-ori-names \\',
-        f'  --rt-profiling --gen-spec-lib --out-lib "{empirical}" \\',
-        f'  --temp "{D}/quant_step2" --out "{first_pass}" \\',
-        f'  --threads {a.s3_cpus} {wflag}{mflag}{flags}',
+        *engine_call([
+            f'{DN} {all_f} --fasta "{fasta}" --lib "{predicted}" --use-quant --quant-ori-names \\',
+            f'  --rt-profiling --gen-spec-lib --out-lib "{empirical}" \\',
+            f'  --temp "{D}/quant_step2" --out "{first_pass}" \\',
+            f'  --threads {a.s3_cpus} {wflag}{mflag}{flags}'],
+            empirical, "the empirical spectral library"),
         must_exist(empirical, "the empirical spectral library")]),
         stage="step 3/5 empirical library assembly", hours=a.s3_time)
 
@@ -2168,7 +2250,7 @@ def main():
 
     s4 = write("step4_finalpass.sbatch", "\n".join([
         header("s4_finalpass", a.threads_per_file, task_memory(a)[1], a.time_per_file, _pa, _aa, qos=_qa, array=array,
-               exclude=a.exclude_nodes), "",
+               exclude=a.exclude_nodes, log_dir=out), "",
         f'echo "Step 4/5 final pass, task ${{SLURM_ARRAY_TASK_ID}} of {n}"; date',
         *measured_guard, pick, tmpguard("quant_step4"),
         'QUANT="${FILE##*/}"; QUANT="${QUANT%.*}.quant"',
@@ -2184,16 +2266,18 @@ def main():
         'mkdir -p "$LIBPRIV"',
         f'cp -f "{empirical}" "$LIBPRIV/lib.parquet"',
         'trap \'rm -rf "$LIBPRIV"\' EXIT',
-        f'{DN} --f "$FILE" --fasta "{fasta}" --lib "$LIBPRIV/lib.parquet" \\',
-        f'  --temp "{D}/quant_step4" --quant-ori-names{xic_arg}{task_out4} \\',
-        f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}',
+        *engine_call([
+            f'{DN} --f "$FILE" --fasta "{fasta}" --lib "$LIBPRIV/lib.parquet" \\',
+            f'  --temp "{D}/quant_step4" --quant-ori-names{xic_arg}{task_out4} \\',
+            f'  --threads {a.threads_per_file} {wflag}{mflag}{flags}'],
+            f'{D}/quant_step4/$QUANT', "this file's final-pass .quant"),
         must_exist(f'{D}/quant_step4/$QUANT', "this file's final-pass .quant")]),
         stage="step 4/5 final pass (array)", hours=a.time_per_file)
 
     # Step 5 — cross-run report (single job, --use-quant --matrices)
     s5 = write("step5_report.sbatch", "\n".join([
         header("s5_report", a.assembly_cpus, a.assembly_mem, a.assembly_time, _ps, _as_, qos=_qs,
-               exclude=a.exclude_nodes), "",
+               exclude=a.exclude_nodes, log_dir=out), "",
         f'echo "Step 5/5 cross-run report"; date', *measured_guard, tmpguard("quant_step4"),
         # the report AND its stats file: check_report_runs.stats_path() names the latter; and
         # the contaminant record, which must never describe a previous search's report
@@ -2235,9 +2319,11 @@ def main():
         f'succeed, so no report was written. Resubmit the step-4 tasks of the runs listed '
         f'MISSING above, then this step." >&2; '
         f'exit 1; fi',
-        f'{DN} {all_f} --fasta "{fasta}" --lib "{empirical}" --use-quant --quant-ori-names \\',
-        f'  --temp "{D}/quant_step4" --matrices --out "{D}/{report}" \\',
-        f'  --threads {a.assembly_cpus} {norm} {wflag}{mflag}{flags}',
+        *engine_call([
+            f'{DN} {all_f} --fasta "{fasta}" --lib "{empirical}" --use-quant --quant-ori-names \\',
+            f'  --temp "{D}/quant_step4" --matrices --out "{D}/{report}" \\',
+            f'  --threads {a.assembly_cpus} {norm} {wflag}{mflag}{flags}'],
+            f'{D}/{report}', "the cross-run report"),
         must_exist(f'{D}/{report}', "the cross-run report"),
         # ...and every input run IN it (check_report_runs.py, the single-shot search's check too).
         # The .quant count above says every run was searched; DIA-NN can still leave one out of
@@ -2394,11 +2480,12 @@ def main():
     if win_probe:
         resolved = {"file": resolved_cfg, "produced": "runtime", "by": s1b,
                     "note": f"written by step 1b only after the {what} "
-                            f"{'are' if len(measure) > 1 else 'is'} measured -- or set by the "
-                            "fallback when the probe measured nothing (probe_fallback.json: "
-                            "no --window in it, DIA-NN chooses per run); absent until then, so "
-                            "a missing file after step 1b means the probe was refused or "
-                            "stopped"}
+                            f"{'are' if len(measure) > 1 else 'is'} measured"
+                            + ("" if "window" in measure else
+                               " -- or set by the mass-accuracy fallback when the probe "
+                               "measured nothing (probe_fallback.json)")
+                            + "; absent until then, so a missing file after step 1b means the "
+                              "probe failed, was refused or was stopped"}
     elif safe["code"] == "dda_window_unset":
         resolved = {"file": resolved_cfg, "produced": "generation", "by": None,
                     "note": "the cfg as given pins mass accuracy; --window is not in it, and for "

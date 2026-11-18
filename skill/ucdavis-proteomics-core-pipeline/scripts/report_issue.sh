@@ -166,6 +166,7 @@ sk-(proj|svcacct|admin)-[A-Za-z0-9_-]{20,}
 (^|[^A-Za-z0-9_])(AKIA|ASIA)[0-9A-Z]{16}([^A-Za-z0-9_]|$)
 (^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*
 (^|[^A-Za-z0-9_.])COREOMICS_TOKEN['"]?[[:space:]]*[:=][[:space:]]*['"]?[^/~.$<[:space:]"'<>][^[:space:]"'<>]{7,}
+(^|[^A-Za-z0-9_.])[A-Z][A-Z0-9_]*(TOKEN|SECRET|KEY|PASSWORD|PASSWD)['"]?[[:space:]]*=[[:space:]]*['"]?[^/~.$<([:space:]"'<>&;|-][^[:space:]"'<>&;|]{11,}
 ERE
 read -r -d '' SECRET_CI <<'ERE'
 authorization:[[:space:]]*(token|bearer)[[:space:]]+[^[:space:]]+
@@ -179,6 +180,11 @@ share_token=['"]?[^/~.$[:space:]"'<>][^[:space:]"'<>]{7,}
 --cookie[[:space:]=]+['"]?[^/~.$[:space:]"'<>-][^[:space:]"'<>]{7,}
 (^|[^A-Za-z0-9_])bearer[[:space:]]+[A-Za-z0-9_.=+/-]{20,}
 authorization['"][[:space:]]*:[[:space:]]*['"](token|bearer)[[:space:]]+[^<{[:space:]'"][^[:space:]'"]*
+(^|[^A-Za-z0-9_-])(-u|--user)[[:space:]=]+['"]?[^[:space:]:'"]+:[^[:space:]'"]*[^[:space:]'"0-9][^[:space:]'"]*
+sshpass[[:space:]]+-p[[:space:]]*['"]?[^[:space:]'"]{4,}
+(mysql|mysqldump|mariadb)([^[:space:]]*[[:space:]])+-p[^[:space:]'"]{6,}
+x-api-key['"]?[[:space:]]*[:=][[:space:]]*['"]?[^[:space:]'"]{8,}
+(^|[^A-Za-z0-9_-])cookie['"]?[[:space:]]*:[[:space:]]*['"]?[A-Za-z0-9_.-]+=[^[:space:]'"]{8,}
 ERE
 looks_secret() {
   local p

@@ -15,9 +15,9 @@ at the R script first.
 **Contents** (section: line)
 - 23: Level 1 — the analysis as plain R
 - 51: Level 2 — the pinned bundle
-- 227: Golden rule 5: every run reproducible, at two levels
-- 250: For maintainers: adding a new `--method` or analysis path
-- 274: 10. The bundle (step 10)
+- 228: Golden rule 5: every run reproducible, at two levels
+- 251: For maintainers: adding a new `--method` or analysis path
+- 275: 10. The bundle (step 10)
 <!-- /contents -->
 
 ## Level 1 — the analysis as plain R
@@ -64,8 +64,9 @@ incomplete. This is the skill's implementation of DE-LIMP architectural rules #1
    table, not a version. Re-running the
    same skill version on the same data type reproduces the parameters exactly.
    (Before 2026-08-14 this came from a remote `workflows/` registry pinned by commit
-   SHA. That registry is retired — old run records citing a SHA stay valid; see
-   `workflows/README.md`.)
+   SHA. That registry is retired — old run records citing a SHA stay valid; the retirement
+   note is `workflows/README.md` in the DE-LIMP repository, not in the skill:
+   https://github.com/bsphinney/DE-LIMP/blob/main/workflows/README.md.)
 2. **Pinned engine version.** `acquire_tools.sh` honors `PIN_ENGINE`/`PIN_VERSION`
    from the manifest and records resolved commands + versions in `tools.json`. The
    recorded version is the build each command actually is — read from the HIVE build

@@ -237,7 +237,10 @@ class Methods(unittest.TestCase):
         self.assertIn("No variable modifications were searched.", text)
 
 
-PHOS = "UniMod:21,79.966331,STY"
+# A modification not in the VAR_MODS table, added through --overrides: protein N-terminal
+# acetylation (DIA-NN README's own example). Phosphorylation was the example here until 2.15.1,
+# which refuses it (PtmSearchRefused below).
+PHOS = "UniMod:1,42.010565,*n"
 
 
 class AnOverrideVarModAdds(unittest.TestCase):
@@ -294,6 +297,32 @@ class AnOverrideVarModAdds(unittest.TestCase):
         self.assertIn("--var-mods 1", lines)
         self.assertEqual(len([ln for ln in lines if ln.startswith("--var-mods ")]), 1)
         self.assertEqual(len([ln for ln in lines if ln.startswith("--var-mod ")]), 3)
+
+
+
+class APtmSearchIsRefused(unittest.TestCase):
+    """Audit 2026-11-17, lane 1 #6: a phospho --var-mod override wrote --var-mods 1 and the
+    default charge range, and the DE was protein-level, with nothing said. The skill does not do
+    site analysis, so it refuses, before any cfg is written."""
+
+    def test_phospho_and_k_gg_are_refused_however_they_are_named(self):
+        for value in ("UniMod:21,79.966331,STY", "Phospho(STY),79.9663,STY",
+                      ["UniMod:35,15.994915,M", "UniMod:21,79.966331,STY"],
+                      "UniMod:121,114.042927,K"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as d:
+                p = estimate(d, "diann", "--overrides", json.dumps({"--var-mod": value}),
+                             ok=False)
+                self.assertNotEqual(p.returncode, 0)
+                self.assertIn("searches and reports proteins, not modification sites",
+                              p.stdout + p.stderr)
+                self.assertFalse(os.path.exists(os.path.join(d, "params.cfg")))
+
+    def test_the_rule_reads_the_mass(self):
+        import estimate_params as ep
+        self.assertIsNotNone(ep.ptm_site_mod("anything,79.966,S"))
+        self.assertIsNone(ep.ptm_site_mod("UniMod:35,15.994915,M"))
+        self.assertIsNone(ep.ptm_site_mod("UniMod:1,42.010565,*n"))
+        self.assertIsNone(ep.ptm_site_mod("not-a-mod"))
 
 
 if __name__ == "__main__":

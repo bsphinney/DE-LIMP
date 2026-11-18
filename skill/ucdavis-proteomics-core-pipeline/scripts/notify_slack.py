@@ -200,6 +200,19 @@ _SECRET_PATTERNS = [
     # ...and its header in a quoted dict or JSON form (`"Authorization": "Token ..."`), which the
     # `authorization:` pattern above misses because of the quote before the colon.
     re.compile(r"(?i)authorization['\"][ \t]*:[ \t]*['\"](?:token|bearer)[ \t]+(?P<s>(?![<{])[^\s'\"]+)"),
+    # 2.15.1 (audit 2026-11-17, finding 11): shapes the list missed. `curl -u user:password` (a
+    # password of digits only -- docker's `-u 1000:1000` -- is a uid:gid, not a secret):
+    re.compile(r"(?i)(?<![A-Za-z0-9_-])(?:-u|--user)[ \t=]+['\"]?[^\s:'\"]+:(?P<s>[^\s'\"]*[^\s'\"0-9][^\s'\"]*)"),
+    # `sshpass -p <password>` (and `-p<password>` glued), and mysql's glued `-p<password>`
+    re.compile(r"(?i)\bsshpass[ \t]+-p[ \t]*['\"]?(?P<s>[^\s'\"]{4,})"),
+    re.compile(r"(?i)\b(?:mysql|mysqldump|mariadb)\b[^\n]*?[ \t]-p(?P<s>[^\s'\"]{6,})"),
+    # an `X-API-Key:` header
+    re.compile(r"(?i)x-api-key['\"]?[ \t]*[:=][ \t]*['\"]?(?P<s>[^\s'\"]{8,})"),
+    # a `Cookie: name=value` header
+    re.compile(r"(?i)(?<![A-Za-z0-9_-])cookie['\"]?[ \t]*:[ \t]*['\"]?(?P<s>[A-Za-z0-9_.-]+=[^\s'\"]{8,}[^\r\n'\"]*)"),
+    # any UPPER_CASE variable named ...TOKEN / SECRET / KEY / PASSWORD set to a value of 12+ characters
+    # that is not a path, a variable or a placeholder (a file NAME such as STAN_PG_TOKEN=/path passes)
+    re.compile(r"(?<![A-Za-z0-9_.])[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|PASSWD)['\"]?[ \t]*=[ \t]*['\"]?(?P<s>(?![/~.$<(-])[^\s\"'<>&;|]{12,})"),
 ]
 
 

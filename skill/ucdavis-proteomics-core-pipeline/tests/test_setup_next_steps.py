@@ -2,7 +2,7 @@
 """setup.json's next_steps: the fix for each item that is not ready, as one sentence for this
 platform, so the agent relays it instead of deriving it from ready_for (SKILL.md step 0).
 
-Keys de, limpa, dia, dda, thermo_raw, resolution_reader; a ready item has no entry, so a ready
+Keys de, limpa, dia, dia_raw, dda, thermo_raw, resolution_reader; a ready item has no entry, so a ready
 machine has {}. Each sentence says when it matters (DIA data only, .raw input only) and reuses the
 fix setup.sh already gives elsewhere (limpa's LIMPA_FIX, nanoparquet.fix, diann.note,
 thermo_raw_reader.note) rather than a second wording of it; each is also printed to stderr as a
@@ -26,7 +26,7 @@ IS_MAC = platform.system() == "Darwin"
 FAKES = os.path.join(HERE, "fixtures", "fake_rawfilereader")
 RAWFILEREADER_DLLS = ("ThermoFisher.CommonCore.RawFileReader.dll",
                       "ThermoFisher.CommonCore.Data.dll")
-KEYS = {"de", "limpa", "dia", "dda", "thermo_raw", "resolution_reader"}
+KEYS = {"de", "limpa", "dia", "dia_raw", "dda", "thermo_raw", "resolution_reader"}
 
 
 def folded(text):
@@ -55,7 +55,8 @@ class SetupNextSteps(limpa_t.SetupLimpaGate):
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         self.assertLessEqual(set(s["next_steps"]), KEYS)
         # the keys other scripts read are still there, beside it
-        self.assertEqual(set(s["ready_for"]), {"de", "dia", "dda", "thermo_raw"})
+        # dia_raw (2.15.1, HIVE F7): can DIA-NN read .raw here; null when not checked
+        self.assertEqual(set(s["ready_for"]), {"de", "dia", "dia_raw", "dda", "thermo_raw"})
         for key in ("limpa", "de_reader", "thermo_raw_reader", "notes", "set_annotation"):
             self.assertIn(key, s)
         # one stderr line per step, the same sentence
@@ -65,7 +66,9 @@ class SetupNextSteps(limpa_t.SetupLimpaGate):
 
     def test_all_ready_is_empty(self):
         r, s = self.check(**self.ready_env())
-        self.assertEqual(s["ready_for"], {"de": True, "dia": True, "dda": True, "thermo_raw": True})
+        # --check runs no ensure_dotnet8.sh, so whether DIA-NN can read .raw is not checked (null)
+        self.assertEqual(s["ready_for"], {"de": True, "dia": True, "dia_raw": None, "dda": True,
+                                          "thermo_raw": True})
         self.assertIs(s["limpa"]["ok"], True)
         self.assertIs(s["thermo_raw_reader"]["resolution_reader"]["ready"], True,
                       s["thermo_raw_reader"]["resolution_reader"])

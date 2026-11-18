@@ -10,8 +10,8 @@ How the skill adapts to where it's running, plus FASTA resolution.
 - 145: Version pinning (reproducibility)
 - 257: FASTA resolution (`fetch_fasta.py`)
 - 436: SLURM submission (hpc)
-- 507: 5. Acquiring the pinned engine (step 5)
-- 554: 6. Building the FASTA (step 6)
+- 504: 5. Acquiring the pinned engine (step 5)
+- 559: 6. Building the FASTA (step 6)
 <!-- /contents -->
 
 ## Platform classes (`detect_env.sh`)
@@ -228,7 +228,7 @@ appear under `result` where the search itself wrote one.
 | `scan_window.mode` | meaning |
 |---|---|
 | `measured` | measured on these runs by step 1b (the 5-step chain) and pinned for every step. Written at generation as the plan; `value` is null and `value_file` (`window.txt`) holds the radius once step 1b has run |
-| `fallback_auto` | step 1b's measurement failed (retried once): DIA-NN chose the radius itself, for each run. `probe_fallback` holds the `reason` |
+| `fallback_auto` | written only by 2.15.0 and earlier: step 1b's measurement failed (retried once) and DIA-NN chose the radius itself, for each run. `probe_fallback` holds the `reason`. From 2.15.1 a failed window probe stops the chain instead (resubmit, or pin `--window`) |
 | `pinned` | given in the cfg and passed to every step (`value`) |
 | `auto` | not set, by design — a single-shot search, or DDA: DIA-NN chose the radius itself |
 | `invalid` | the cfg passes a `--window` that is not one positive integer — `0` included: DIA-NN logs `scan window radius should be a positive integer` and then chooses a radius per file (the poplar run), so `0` is a rejected value, not `auto` (which means the flag was not set). What DIA-NN does with any other non-integer is unverified |
@@ -489,12 +489,9 @@ partition is `high`; `genome-center-grp` has `high` (per-user cap 64 CPUs) and `
 but no `low`; `publicgrp` has `high` (8 CPUs / 128 GB **per job**) and `low` (no per-job
 cap, preemptible).
 
-`run_search.py` passes `--partition/--account/--qos` on to the job-array routes (the DIA-NN
-5-step chain and the Radiant per-file array). Whether the single-script `--sbatch` paths —
-DIA-NN at ≤5 files or when the chain declines, Sage, FragPipe, AlphaDIA, single-file
-Radiant — honour them has changed between skill versions, so on every route **read the
-`#SBATCH` header of the generated script before submitting**: it is the queue the job will
-use. Submit with `sbatch job.sh` (or `bash <out>/submit.sh` for a two-job or chained
+`run_search.py` puts `--partition/--account/--qos` into every job header it writes, on every
+route (search-engines.md, the single-shot SLURM bullets). Still **read the `#SBATCH` header of the
+generated script before submitting**: it is the queue the job will use. Submit with `sbatch job.sh` (or `bash <out>/submit.sh` for a two-job or chained
 search), poll the `<job>_<id>.log`, then run `run_search.py --adapt-only` for Sage/FragPipe
 to build `report.parquet`.
 
@@ -525,6 +522,14 @@ later prints an **engine version mismatch WARNING**, the version the user confir
 the one about to run — say so before submitting (both land in `search_provenance.json`). If
 it prints that the record is **`version: null`**, say that too: the search will be recorded
 and deposited with no engine version.
+
+**Downloads are checked (2.15.1).** A downloaded engine is used only when its sha256 matches
+the value the vendor published (`verify_download.sh`, `pinned_checksums.txt`: FragPipe 24.0,
+DIA-NN 2.7.0 and 2.6.1 for Linux). A mismatch prints `ERROR: <name> does not match the
+published checksum, so it was NOT used` with both sha256 values, deletes the file and installs
+nothing (`tools.json` `notes` says the download did not match): tell the user, try again later or on another network, and report it
+if it repeats. A build with no published checksum (Sage) is used and `notes` says `NOT
+verified`. A `sage` on PATH is used only when it is shown to be the pinned version (0.14.7).
 
 **FragPipe (2.15):** `PIN_ENGINE=fragpipe PIN_VERSION=24.0` uses the Core's install where it is
 readable and is the pinned release (on HIVE: no download into your home; the one path is
@@ -576,9 +581,10 @@ The sidecar records `keratin_sample: true`, the removed entries under
 `keratin_contaminants_in_database: []`. Every other build records `keratin_sample: false` and
 lists the keratin-family `Cont_` accessions its database still holds.
 `--enzyme` names the digestion enzyme(s) actually used (trypsin, lysc, gluc, chymotrypsin,
-aspn, argc, lysn, pepsin; comma- or slash-separated — `Trypsin/P` and `Trypsin/Lys-C` work). The default `trypsin,lysc` is the Core's usual
-mix — leave it unless the user says otherwise; change it for a different digest (`--enzyme
-gluc`, `--enzyme trypsin,pepsin`). Only those enzymes' contaminant entries stay `Cont_` when
+aspn, argc, lysn, pepsin; comma- or slash-separated — `Trypsin/P` and `Trypsin/Lys-C` work).
+**Always pass step 3's answer** (asked, never inferred: SKILL.md step 3). The script's default
+`trypsin,lysc` (the Core's usual mix) is only what a build with no `--enzyme` assumes, never a
+substitute for asking; a different digest is `--enzyme gluc`, `--enzyme trypsin,pepsin`. Only those enzymes' contaminant entries stay `Cont_` when
 they match a protein of the searched organism (their autolysis peptides stay out of quant);
 any other protease is treated as sample protein — which matters for organisms that make the
 enzyme themselves (S. aureus's own SspA is the Glu-C entry, quantified on a trypsin digest).

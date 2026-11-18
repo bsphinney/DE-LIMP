@@ -36,6 +36,18 @@ _DROPPED_PREFIXES = ("SLURM_", "SKILL_SLACK", "FRAN_", "RECORD_RUN", "SKILL_RUNS
                      "SKILL_NOTES")
 
 
+def no_hive_marker(tmpdir):
+    """The overrides of the ONE "is this HIVE? is SLURM here?" rule (scripts/hive_marker.sh,
+    run_search.cluster_is_hive), every one pointed at nothing inside `tmpdir`. A test that simulates
+    a laptop or another machine and runs detect_env.sh, check_access.sh or run_search MUST set
+    them: on a real HIVE node HPC@UCD's cluster file says "hive", the Core's group folder exists
+    and sbatch sits at HPC@UCD's fixed path, so the script under test would rightly say "on HIVE"
+    (2.15.1 HIVE suite: 39 failures in tests that pass on a laptop)."""
+    return {"UCD_HPC_CLUSTER_CONF": os.path.join(tmpdir, "no_cluster_file"),
+            "HIVE_GROUP_DIR": os.path.join(tmpdir, "no_group_dir"),
+            "HPCCF_SLURM_BIN": os.path.join(tmpdir, "no_slurm_bin")}
+
+
 def job_env(tmpdir, base=None, **extra):
     """A copy of `base` (default os.environ) with every job-end side effect switched off:
     no Slack post, no FRAN staging, no run log, no HIVE login, no SLURM job -- and the run log,
@@ -58,8 +70,12 @@ def job_env(tmpdir, base=None, **extra):
                HIVE_ENV_FILE="/nonexistent/hive.env",
                SKILL_NOTES_DIR=os.path.join(tmpdir, "skill_notes"),
                SKILL_CONFIG_DIR=os.path.join(tmpdir, "skill_config"),
-               HPCCF_SLURM_BIN=os.path.join(tmpdir, "no_slurm_bin"),
-               UCD_HPC_CLUSTER_CONF=os.path.join(tmpdir, "no_cluster_file"))
+               # 2.15.1: with no cluster file HIVE is known by the Core's group folder
+               # (run_search.cluster_is_hive). A test that puts a fake sbatch on PATH is simulating
+               # HIVE -- its queue names are HIVE's -- so the folder is "there"; a test of another
+               # SLURM cluster names a conf file or HIVE_GROUP_DIR of its own in `extra`.
+               HIVE_GROUP_DIR=tmpdir)
+    env.update({k: v for k, v in no_hive_marker(tmpdir).items() if k != "HIVE_GROUP_DIR"})
     env["PYTHONPATH"] = os.pathsep.join(
         [roomy_disk_dir(tmpdir)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     env.update({k: str(v) for k, v in extra.items()})

@@ -15,7 +15,7 @@ Every request: `User-Agent: ucdavis-proteomics-skill (+https://github.com/bsphin
 | NCBI Protein | `esummary.fcgi?db=protein&id=<ACC>`, then `efetch.fcgi?db=protein&id=<ACC>&rettype=gp&retmode=text` for the gene (`/gene=`, `/db_xref="GeneID:"`) | none | as NCBI Gene | as NCBI Gene | all |
 | HGNC | `GET https://rest.genenames.org/fetch/hgnc_id/<HGNC:n>` with `Accept: application/json` (default is XML) | `GET /info` -> `lastModified` (HGNC updates continuously) | CC0 | 10 requests/s; overload can bring an IP block | human only |
 | Ensembl | `GET https://rest.ensembl.org/lookup/id/<id>?content-type=application/json` (unversioned id) | `GET /info/data` -> `releases[0]` | no statement found on the REST pages | 55,000 requests/hour; 429 with `Retry-After` | vertebrates and some model organisms, including S. cerevisiae (the old `rest.ensemblgenomes.org` has a broken TLS certificate and is not used) |
-| Human Protein Atlas | `GET https://www.proteinatlas.org/<ENSG>.json` | none: HPA states no version or date in its answer, so the card says "version not stated by the source" and never types one in | CC BY 4.0 (cite Uhlen et al., Science 2015; give the item URL) | none documented | human genes only |
+| Human Protein Atlas | `GET https://www.proteinatlas.org/<ENSG>.json` | none: HPA states no version or date in its answer, so the card says "version not stated by the source" and never types one in | CC BY 4.0 (cite Uhlén M et al. (2015) Tissue-based map of the human proteome. Science 347(6220):1260419, doi:10.1126/science.1260419 (PubMed 25613900, checked 2026-11-17); give the item URL) | none documented | human genes only |
 
 ## What each block shows
 

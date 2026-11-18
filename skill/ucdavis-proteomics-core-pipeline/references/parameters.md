@@ -16,12 +16,12 @@ stale and hide which values were actually chosen vs. guessed).
 - 157: FragPipe DDA: digest, ion-trap MS2 and unit resolution (2.15)
 - 199: Defaults that are NOT data-dependent (universal)
 - 203: Variable modifications (`--var-mods`)
-- 246: SILAC labels (`--labels silac2|silac3 --label-preset ... [--channel-norm spec|run]`)
-- 254: Cysteine: which alkylating agent, or none (`--cys-alkylation`)
-- 292: CPU-hours a search reserves (`cpu_hours_reserved`)
-- 306: Golden rule 2: never fabricate parameters
-- 313: Provenance (DE-LIMP rule #2)
-- 340: Overriding a setting (the user's choice)
+- 248: SILAC labels (`--labels silac2|silac3 --label-preset ... [--channel-norm spec|run]`)
+- 256: Cysteine: which alkylating agent, or none (`--cys-alkylation`)
+- 294: CPU-hours a search reserves (`cpu_hours_reserved`)
+- 308: Golden rule 2: never fabricate parameters
+- 315: Provenance (DE-LIMP rule #2)
+- 342: Overriding a setting (the user's choice)
 - 367: Golden rule 1: confirm before committing compute
 - 383: 4. Resolving the defaults, and the one confirmation (step 4)
 - 462: 6b. Estimating the search parameters (step 6b)
@@ -206,9 +206,11 @@ masses are UniMod's), or `none`. **Any other word is refused** before a file is 
 known words in the message: it used to be dropped without a word, so a "like-for-like" re-search
 of a FragPipe study that asked for N/Q deamidation ran without it (2026-10-29). A modification
 not in the table goes in `--overrides`, and it ADDS to the table's: DIA-NN
-`{"--var-mod": "UniMod:21,79.966331,STY"}` (a list for several) joins the `--var-mod` lines, and
-`--var-mods` (one per kind) counts it unless you set `--var-mods` too; Sage
-`{"database": {"variable_mods": {"S": [79.966331]}}}` merges into the block. Giving `--var-mods`
+`{"--var-mod": "UniMod:1,42.010565,*n"}` (N-terminal acetyl; a list for several) joins the
+`--var-mod` lines, and `--var-mods` (one per kind) counts it unless you set `--var-mods` too; Sage
+`{"database": {"variable_mods": {"W": [15.994915]}}}` (tryptophan oxidation) merges into the
+block. A site-level PTM (phospho, UniMod:21; K-GG, UniMod:121) is refused on both engines
+(2.15.1): the skill reports proteins, not modification sites (SKILL.md "What this skill does not do"). Giving `--var-mods`
 replaces the default; to add deamidation and keep Met-ox, give `ox,deam`. On DIA-NN, a `--var-mod`
 override ADDS, but a `--fixed-mod` override REPLACES every `--fixed-mod` line, the
 `--cys-alkylation` one included: that is how a user changes the alkylation, and the sidecar's
@@ -340,7 +342,7 @@ is never mistaken for a confirmed setting.
 ## Overriding a setting (the user's choice)
 
 Two ways, both honored:
-- `param_overrides` in the workflow.yaml, or `--overrides` (e.g. `{"--mass-acc": 8}` or
+- `--overrides` (e.g. `{"--mass-acc": 8}` or
   `{"fragment_tol": {"ppm": [-15, 15]}}`) — merged on top of the estimate, tagged as a user
   override with who set it and why (above). A Sage override merges at every depth
   (`estimate_params.deep_merge`): `{"database": {"enzyme": {"missed_cleavages": 1}}}` changes
@@ -358,9 +360,7 @@ Two ways, both honored:
   override is **refused** with a message naming the missing flag: written alone it would fix
   that level at 20 ppm. Give both flags, pass the resolutions, or override neither. **This is a
   hard exit**, and any cfg and `.rationale.json` already at `--out` are deleted with it, so a
-  refusal never leaves a stale parameter set behind for the next step to read. A `workflow.yaml`
-  whose `param_overrides` sets one mass-accuracy flag for such an instrument used to produce a
-  cfg and now fails — see the changelog entry.
+  refusal never leaves a stale parameter set behind for the next step to read.
 - Ship a full validated `params_file` in the workflow — used verbatim, estimation
   skipped entirely. Use this when a method is locked and must not move.
 
@@ -392,7 +392,7 @@ python3 scripts/resolve_defaults.py \
 
 Writes `./wf/workflow.manifest.json` (engine + pinned version, mass accuracy and its
 source, DE method) and, for FragPipe/Radiant, generates the config file itself. Pass
-`--env` (step 1's `detect_env.sh` output) so an engine that **cannot run on this
+`--env` (step 0b's `detect_env.sh` output) so an engine that **cannot run on this
 machine** fails here with a usable alternative rather than mid-search.
 
 **Orbitrap resolution — pass it, and say where it came from.** For a Thermo Orbitrap other

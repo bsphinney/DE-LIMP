@@ -548,8 +548,8 @@ footer p { max-width: var(--col); }
         <div class="step-body">
           <h3>It detects your data and confirms the plan</h3>
           <p>
-            It reads the files to determine DIA or DDA and the instrument, matches a validated
-            workflow, and shows you what it intends to run. <strong>Nothing heavy starts without
+            It reads the files to determine DIA or DDA and the instrument, works out the search
+            settings from that, and shows you what it intends to run. <strong>Nothing heavy starts without
             your explicit go-ahead</strong> &mdash; a search can run for hours, so it always asks first.
           </p>
         </div>
@@ -652,9 +652,10 @@ footer p { max-width: var(--col); }
       <span class="tag">Check this if you're not at a university</span>
       <p>
         DIA-NN's free build is licensed for <strong>academic and non-profit use only</strong>. If you're
-        in a commercial setting, say so when asked and the skill will route your DIA data to
-        <strong>AlphaDIA</strong> (Apache-2.0) or <strong>Sage</strong> (MIT) instead. Both are free for
-        commercial use.
+        in a commercial setting, say so when asked. The skill does not switch a DIA search to another
+        engine by itself: for DIA data you need a DIA-NN licence of your own, or FragPipe's DIA route
+        under FragPipe's commercial licence terms. <strong>Sage</strong> (MIT) is free for
+        commercial use, but it is a DDA engine, not a DIA one.
       </p>
     </div>
   </div>
@@ -737,7 +738,7 @@ footer p { max-width: var(--col); }
       <strong>UC Davis Proteomics Core</strong> &mdash; the
       <a href="https://github.com/bsphinney/UCD-Proteomics-AI-Skill">UCD-Proteomics-AI-Skill</a> repository; before 2.15, part of the
       <a href="https://github.com/bsphinney/DE-LIMP">DE-LIMP</a> project.
-      Searches run in DIA-NN, FragPipe or Sage; differential expression uses
+      DIA data are searched with DIA-NN; DDA data with Sage or FragPipe (by data type); differential expression uses
       <a href="https://bioconductor.org/packages/limpa/">limpa</a> and limma.
       Every analysis ships with the provenance needed to reproduce it.
     </p>

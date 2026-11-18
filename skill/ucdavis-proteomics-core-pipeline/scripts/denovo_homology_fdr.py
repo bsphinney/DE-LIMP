@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-denovo_homology_fdr.py -- FDR for de novo -> homology species ID.
+denovo_homology_fdr.py -- a target-decoy confidence tier for de novo -> homology hits.
 
-Controls the two error modes that matter when calling a species from de novo
-peptides BLASTed against nr: chance homology, and de novo sequencing error.
+EXPLORATORY (denovo_lca.EXPLORATORY). The cut this script makes is a target-decoy estimate of
+CHANCE HOMOLOGY -- decoy spectra whose de novo peptides still hit nr -- at the --fdr level. It
+is NOT a false discovery rate on de novo sequence correctness: on the HeLa entrapment the
+peptides accepted at the nominal 1% were 59.8% correct (point 3 below). Never call it an FDR on
+the sequences, and never gate the species call on it (point 5) (audit 2026-11-17, lane 2 #7).
 Method: NovoBoard decoy spectra (Tran NH et al., Mol Cell Proteomics 2024,
 doi:10.1016/j.mcpro.2024.100849) + a linear mokapot rescoring.
 
@@ -67,6 +70,15 @@ import json
 import math
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from denovo_lca import EXPLORATORY  # noqa: E402  (the route's one self-description)
+
+# What `fdr` in this script's record is, and is not.
+FDR_MEANING = ("target-decoy estimate of chance homology among accepted hits (decoy spectra "
+               "whose de novo peptides still hit nr), at this level. NOT a false discovery rate "
+               "on de novo sequence correctness: on the HeLa entrapment, peptides accepted at a "
+               "nominal 0.01 were 59.8% correct.")
 
 # Feature set. Order is fixed so a rebuilt model is comparable to a recorded one.
 DEFAULT_FEATURES = ["bitscore", "log_evalue", "pep_len", "pident", "mean_conf"]
@@ -226,7 +238,9 @@ def main():
     ap.add_argument("--features", default="default", choices=sorted(FEATURE_SETS),
                     help="'default' is the 5-feature linear model; the others exist "
                          "only to reproduce the comparison and are NOT better")
-    ap.add_argument("--fdr", type=float, default=0.01)
+    ap.add_argument("--fdr", type=float, default=0.01,
+                    help="target-decoy level for chance homology (NOT an FDR on sequence "
+                         "correctness; see the header)")
     ap.add_argument("--out", required=True, help="accepted peptides TSV")
     ap.add_argument("--no-model", action="store_true",
                     help="skip mokapot; threshold on E-value alone")
@@ -311,6 +325,9 @@ def main():
         "features": feats if use_model else None,
         "model": "mokapot linear (LinearSVC)" if use_model else "E-value threshold",
         "fdr": a.fdr,
+        "fdr_meaning": FDR_MEANING,
+        "status": EXPLORATORY["status"],
+        "say": EXPLORATORY["say"],
         "out": os.path.abspath(a.out),
         "notes": notes,
         "species_call_guidance":

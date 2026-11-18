@@ -737,6 +737,25 @@ def radiant_tolerances(cls, m1, m2, label):
             f"20 ppm kept -- {why_kept} ({label})")
 
 
+# The Radiant route is EXPERIMENTAL, and its records say so (route_status, read by the Methods
+# and the report: rule 1, the route describes itself). Audit 2026-11-17, lane 1 #3: its
+# extraction widths are DIA-NN's documented mass-accuracy guidance applied to Radiant's
+# ms1/ms2ExtractionWidthPPM -- our inference, not Seer's, and DIA-NN's README calls its own values
+# "guidance", not extraction windows. Whether Radiant's parameter is a full or a half width is
+# unknown, and no benchmark on Core data backs the narrowed values.
+RADIANT_ROUTE_STATUS = {
+    "status": "experimental",
+    "reasons": [
+        "extraction widths narrowed from DIA-NN's documented mass-accuracy table, which DIA-NN "
+        "calls guidance rather than an extraction window; applying it to Radiant's "
+        "ms1/ms2ExtractionWidthPPM is the skill's inference, not the vendor's, and has not been "
+        "benchmarked on Core data (whether Radiant's value is a full or a half width is "
+        "unknown)",
+        "the spectral library is DIA-NN's prediction converted to a TSV, not a vendor library",
+    ],
+    "say": "Radiant results are experimental: use the DIA-NN route for results of record."}
+
+
 def build_radiant(args, cls, ms1, ms2, label, src, prov):
     if cls == "timstof":
         sys.exit("make_presets: Radiant/Fulcrum cannot read Bruker .d at all -- its search "
@@ -756,13 +775,13 @@ def build_radiant(args, cls, ms1, ms2, label, src, prov):
     if m1 is not None:
         changes[("MS1Params", "ms1ExtractionWidthPPM")] = float(m1)
         why["[MS1Params] ms1ExtractionWidthPPM"] = (
-            f"{m1} ppm for {label} [DERIVED from DIA-NN's instrument table; Seer ships a flat "
-            f"20.0 for every Orbitrap, which is too wide for narrow-window data]"
+            f"{m1} ppm for {label} [DERIVED from DIA-NN's instrument table, UNVALIDATED for "
+            f"Radiant (route_status: experimental); Seer ships a flat 20.0 for every Orbitrap]"
             if args.ms1_ppm is None else f"{m1} ppm (caller override)")
     if m2 is not None:
         changes[("MS2Params", "ms2ExtractionWidthPPM")] = float(m2)
         why["[MS2Params] ms2ExtractionWidthPPM"] = (
-            f"{m2} ppm for {label} [DERIVED as above]"
+            f"{m2} ppm for {label} [DERIVED as above, UNVALIDATED for Radiant]"
             if args.ms2_ppm is None else f"{m2} ppm (caller override)")
     if args.threads:
         changes[("General", "threadCount")] = int(args.threads)
@@ -786,6 +805,7 @@ def build_radiant(args, cls, ms1, ms2, label, src, prov):
         # does not run, and the table is no longer extrapolated -- so say which level stayed at
         # the vendor default and why, rather than "narrowed" or "not recognised".
         "tolerances": radiant_tolerances(cls, m1, m2, label),
+        "route_status": RADIANT_ROUTE_STATUS,
         "licence": "Apache-2.0 + Commons Clause + grant-back; restricts fee-for-service use",
     })
     return out

@@ -26,6 +26,8 @@ import sys
 import tempfile
 import unittest
 
+from job_env import no_hive_marker
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
@@ -250,7 +252,7 @@ class Java(unittest.TestCase):
                 for t in ("head", "tr", "sed", "dirname", "cat"):
                     os.symlink(shutil.which(t), os.path.join(b, t))
                 r = subprocess.run([shutil.which("bash"), os.path.join(SCRIPTS, "detect_env.sh")],
-                                   capture_output=True, text=True, env={"PATH": b}, timeout=60)
+                                   capture_output=True, text=True, env={"PATH": b, **no_hive_marker(d)}, timeout=60)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 fp = json.loads(r.stdout)["engines"]["fragpipe"]
                 self.assertIs(fp["available"], ok)
@@ -267,7 +269,7 @@ class Java(unittest.TestCase):
             for t in ("head", "tr", "sed", "dirname", "cat"):
                 os.symlink(shutil.which(t), os.path.join(b, t))
             r = subprocess.run([shutil.which("bash"), os.path.join(SCRIPTS, "detect_env.sh")],
-                               capture_output=True, text=True, env={"PATH": b}, timeout=60)
+                               capture_output=True, text=True, env={"PATH": b, **no_hive_marker(d)}, timeout=60)
             fp = json.loads(r.stdout)["engines"]["fragpipe"]
             self.assertIs(fp["available"], False)
             self.assertIn("NO macOS build", fp["note"])

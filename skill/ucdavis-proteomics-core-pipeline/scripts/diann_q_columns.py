@@ -163,6 +163,14 @@ def row_passes(row, cuts):
     return True
 
 
+def is_protein_level(column):
+    """Is `column` (one of PROTEIN_Q_PREFERENCE) a protein-group q-value? Global.Q.Value and
+    Q.Value are precursor q-values: the best of them over a protein's precursors is not a
+    protein-level FDR, and a record must not call it one (the Radiant adapter, audit
+    2026-11-17 lane 1 #7)."""
+    return column in PROTEIN_Q_PREFERENCE and ".PG." in f".{column}"
+
+
 def protein_q_column(available):
     """The single best protein-level q-column present, or None."""
     have = set(available)

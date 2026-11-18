@@ -36,8 +36,11 @@ from test_normalization_check import HAVE_ARROW, NEEDS, make_report  # noqa: E40
 from test_run_de_contaminants import r_has  # noqa: E402
 
 RUN_DE = os.path.join(SCRIPTS, "run_de.R")
-QUANTILE_ONLY = ("quantile normalisation (limma::normalizeBetweenArrays) only: the DIA-NN search "
-                 "ran with --no-norm, so PG.MaxLFQ carries no DIA-NN cross-run normalisation")
+# 2.15.1 (HIVE F1): --between-run auto on a --no-norm report is median-ratio centring (quantile
+# up to 2.15.0); the text names the step and why there is only one
+NO_NORM_ONLY = ("only: the DIA-NN search ran with --no-norm, so PG.MaxLFQ carries no DIA-NN "
+                "cross-run normalisation")
+MEDIAN_RATIO_ONLY = "median-ratio centring (each run shifted by its median log2 ratio"
 DIANN_ONLY = "DIA-NN's cross-run normalisation (PG.MaxLFQ already carries it); no second step"
 
 
@@ -115,8 +118,10 @@ class TheDESaysWhatRan(unittest.TestCase):
         report, cond, contrast = make_report(os.path.join(self.d, "nn"), "whole", no_norm=True)
         # no provenance: the data say it
         prov, methods = self.de(report, cond, contrast, "data")
-        self.assertEqual(prov["normalisation"], QUANTILE_ONLY)
-        self.assertIn(QUANTILE_ONLY, methods)
+        self.assertTrue(prov["normalisation"].startswith(MEDIAN_RATIO_ONLY), prov["normalisation"])
+        self.assertTrue(prov["normalisation"].endswith(NO_NORM_ONLY), prov["normalisation"])
+        self.assertIn(prov["normalisation"], methods)
+        self.assertEqual(prov["between_run"]["method"], "median_ratio")
         self.assertNotIn("DIA-NN's cross-run normalisation (PG.MaxLFQ)", methods)
         self.assertTrue(prov["dia_nn_normalisation"]["no_norm"])
         self.assertTrue(prov["dia_nn_normalisation"]["source"].startswith("read from the data"))
@@ -124,7 +129,8 @@ class TheDESaysWhatRan(unittest.TestCase):
         named = os.path.join(os.path.dirname(report), dp.NO_NORM_REPORT)
         os.rename(report, named)
         prov, _ = self.de(named, cond, contrast, "named")
-        self.assertEqual(prov["normalisation"], QUANTILE_ONLY)
+        self.assertTrue(prov["normalisation"].startswith(MEDIAN_RATIO_ONLY), prov["normalisation"])
+        self.assertTrue(prov["normalisation"].endswith(NO_NORM_ONLY), prov["normalisation"])
         self.assertIn("the report's name", prov["dia_nn_normalisation"]["source"])
 
     def test_a_normal_report_says_dia_nn_only_from_its_provenance(self):

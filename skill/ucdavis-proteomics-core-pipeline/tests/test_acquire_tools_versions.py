@@ -54,22 +54,25 @@ DIANN_RELEASES = """[
 # A curl that knows three URLs and fails (exit 22, like `curl -f`) on everything else, so
 # FragPipe / Sage release lookups simply resolve nothing instead of touching the network.
 STUB_CURL = r"""#!/bin/sh
-url=""; out=""
+url=""; out=""; wcode=""
+emit() { if [ -n "$out" ] && [ -n "$wcode" ]; then cat > "$out"; printf 200; else cat; fi; }
 while [ $# -gt 0 ]; do
   case "$1" in
+    -w) wcode=1; shift 2 ;;
+    -H) shift 2 ;;
     -o) out="$2"; shift 2 ;;
     http*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
 case "$url" in
-  *api.github.com/repos/vdemichev/DiaNN/releases*) cat "$FIXTURES/diann_releases.json" ;;
+  *api.github.com/repos/vdemichev/DiaNN/releases*) emit < "$FIXTURES/diann_releases.json" ;;
   *DIA-NN-*-Academia-Linux.zip) cp "$FIXTURES/diann.zip" "$out" ;;
   # FragPipe only answers for the tests that lay the fixtures down; everything else still
   # resolves nothing, exactly as before.
   *api.github.com/repos/Nesvilab/FragPipe/releases*)
      [ -f "$FIXTURES/fragpipe_releases.json" ] || exit 22
-     cat "$FIXTURES/fragpipe_releases.json" ;;
+     emit < "$FIXTURES/fragpipe_releases.json" ;;
   *FragPipe-*.zip)
      [ -f "$FIXTURES/fragpipe.zip" ] || exit 22
      cp "$FIXTURES/fragpipe.zip" "$out" ;;
@@ -81,9 +84,9 @@ esac
 # What acquire_tools.sh and diann_release.sh call, plus what STUB_CURL itself needs. Linked
 # one by one into the harness PATH; anything else (sage, docker, apptainer, pip, java,
 # alphadia) is absent unless a test stubs it.
-COREUTILS = ("basename", "cat", "chmod", "cp", "cut", "dirname", "find", "grep", "gzip", "head",
-             "ls", "mkdir", "rm", "sed", "sort", "tail", "tar", "tee", "tr", "uname", "unzip",
-             "xargs")
+COREUTILS = ("awk", "basename", "cat", "chmod", "cp", "cut", "date", "dirname", "find", "grep", "gzip",
+             "head", "ls", "mkdir", "mktemp", "mv", "rm", "sed", "shasum", "sort", "tail", "tar", "tee",
+             "tr", "uname", "unzip", "xargs")
 
 
 def _exe(path, text):
@@ -141,6 +144,9 @@ class AcquireHarness(unittest.TestCase):
             "HOME": self.d, "FIXTURES": self.fix,
             "DIANN_HIVE_DIR": self.hive, "PIN_ENGINE": pin_engine,
             "PIN_VERSION": pin_version,
+            # no pinned checksums here: the stub archives are not the vendors' (verify_download.sh says
+            # "not verified"); tests of the check itself name their own table
+            "PINNED_CHECKSUMS": os.path.join(self.d, "no_checksums.tsv"),
             "ALPHADIA_HIVE_SIF": os.path.join(self.d, "no_alphadia.sif"),
             "RADIANT_HIVE_DIRS": f"{self.radiant_dirs[0]}:{self.radiant_dirs[1]}"})
         env.update(extra_env or {})

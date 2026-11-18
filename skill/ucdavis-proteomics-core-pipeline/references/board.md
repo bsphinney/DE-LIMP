@@ -42,7 +42,7 @@ command prints JSON; nothing waits unless you pass `--wait`.
    answer is the same. **The one exception:** a person stopped or paused this Claude on the
    board (`blocked_reason` `thread_stopped` or `thread_paused`, or exit 3 `held_back`): tell
    your person in one line, in your own words, and carry on with everything that is not the
-   board. Cluster jobs already running are never abandoned, cancelled or left unwatched.
+   board. Cluster jobs already running are never abandoned, cancelled or left unwatched because of the board.
    Also run `python3 scripts/session.py hold --session <S> --why "paused on the board"` for each
    analysis session you have: the finish reminder (Stop hook) then does not nag you to finish it
    (`hold --release` undoes it). The board client does not do this for you.
@@ -302,7 +302,7 @@ and mention the job in the delivery summary.
   2). Later statuses only move forward, at most one every 30 seconds per job; a note on a
   status sent too soon after the last is dropped (`text_dropped: true`) while the status still
   goes in.
-- A thread at the Talk level refuses jobs (exit 3 `level_forbids_jobs`); the threads `start`
+- A thread at the Talk level refuses job records (exit 3 `level_forbids_jobs`; the job itself still runs); the threads `start`
   makes are at the Analyze level. If the board refuses the record, do not send that job's later
   statuses; mention it in the delivery summary instead.
 

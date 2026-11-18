@@ -67,7 +67,8 @@ def search(d, engine, n_files, *extra, slurm=False):
         _write(os.path.join(b, "sbatch"), "#!/bin/sh\necho 1\n", 0o755)
         path.insert(0, b)
     env.update(PATH=os.pathsep.join(path), HPCCF_SLURM_BIN=os.path.join(d, "no_slurm"),
-               UCD_HPC_CLUSTER_CONF=os.path.join(d, "no_cluster_file"))
+               UCD_HPC_CLUSTER_CONF=os.path.join(d, "no_cluster_file"),
+               HIVE_GROUP_DIR=d)       # a fake sbatch here stands for HIVE (2.15.1: cluster_is_hive)
     out = os.path.join(d, "out")
     p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
                         "--tools", tools, "--bundle", bundle, "--params", params,

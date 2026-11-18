@@ -518,6 +518,16 @@ def do_init(a):
     p = paths_for(session_dir)
     if wanted:
         _record_analysis_for(p, wanted)
+    # the assistant running this analysis, as the environment names it (ai_agent.detected; never
+    # a guess): the report and the podcast read it later, from jobs that do not have that
+    # environment. One already recorded (a re-run of init on the session) is kept.
+    try:
+        import ai_agent
+        agent = ai_agent.detected()
+        if agent and not ai_agent._session_agent(session_dir):
+            _set_session_key(p, "ai_agent", agent, "init")
+    except (Exception, SystemExit) as e:         # said, never a reason to fail init
+        sys.stderr.write(f"[session] the AI assistant was not recorded: {e}\n")
 
     # self-contained: copy the skill scripts that ran this analysis
     skill_scripts = os.path.dirname(os.path.abspath(__file__))
@@ -966,6 +976,78 @@ def faims_step(p, man):
             if name not in seen:
                 seen.add(name)
                 man.note(name, z["sentence"])
+
+
+ONOFF_PART = "DE: on/off proteins (output/tables/OnOff_Proteins.csv)"
+
+
+def onoff_step(p, man):
+    """The MaxLFQ route's on/off list, one MANIFEST.txt line (CLAUDE.md rule 4: never silently
+    absent), from de_provenance.json `onoff`: [OK] with the counts when OnOff_Proteins.csv was
+    written and is there; [SKIPPED] with the reason when run_de.R could not make it, the file is
+    missing, or no contrast was a simple A-B; [NOTE] for contrasts it skipped. Nothing for a DE
+    without the record (limpa: missing values are inferred, there is no such list)."""
+    try:
+        with open(os.path.join(p["de_dir"], "de_provenance.json"), encoding="utf-8") as fh:
+            rec = (json.load(fh) or {}).get("onoff")
+    except (OSError, ValueError):
+        return
+    if not isinstance(rec, dict):
+        return
+    file = rec.get("file") or "OnOff_Proteins.csv"
+    if rec.get("status") == "failed":
+        man.skip(ONOFF_PART, f"not written by run_de.R: {rec.get('reason') or 'no reason recorded'}")
+        return
+    if not os.path.isfile(os.path.join(p["de_dir"], file)):
+        man.skip(ONOFF_PART, f"de_provenance.json says it was written, but {file} is not in "
+                             f"{os.path.relpath(p['de_dir'], p['session_dir'])}")
+        return
+    con = rec.get("contrasts") if isinstance(rec.get("contrasts"), dict) else {}
+    if rec.get("status") == "no_simple_contrasts" or not con:
+        man.skip(ONOFF_PART, "no contrast is a simple A-B between two groups, so none was assessed")
+    else:
+        per = "; ".join(f"{c} {t.get('n_onoff', '?')}" for c, t in con.items() if isinstance(t, dict))
+        man.ok(ONOFF_PART, f"min. {rec.get('n_min', '?')} runs; per contrast: {per}")
+    for c, why in (rec.get("skipped") or {}).items():
+        man.note(f"DE: on/off proteins, contrast {c}", f"skipped: {why}")
+
+
+QUANTUMS_PART = "DE: QuantUMS cutoff trade-off (output/tables/QuantUMS_tradeoff.csv)"
+INCOMPLETE_PART = "DE: calls on incomplete data (columns of the DE tables)"
+
+
+def quantums_step(p, man):
+    """The MaxLFQ route's QuantUMS trade-off table and the every-route incomplete-data flag, one
+    MANIFEST.txt line each (rule 4: never silently absent), from de_provenance.json: [OK] when written
+    (and the file is there), [SKIPPED] with the recorded reason when run_de.R skipped or could not
+    make it (limpa, no QuantUMS columns, a failure). Nothing for a DE with neither record."""
+    try:
+        with open(os.path.join(p["de_dir"], "de_provenance.json"), encoding="utf-8") as fh:
+            prov = json.load(fh) or {}
+    except (OSError, ValueError):
+        return
+    inc = prov.get("incomplete_data")
+    if isinstance(inc, dict):
+        tabs = prov.get("de_tables") if isinstance(prov.get("de_tables"), dict) else {}
+        per = "; ".join(f"{c} {t.get('n_called_incomplete', '?')}/{t.get('n_significant', '?')}"
+                        for c, t in tabs.items() if isinstance(t, dict))
+        man.ok(INCOMPLETE_PART, f"significant calls flagged, per contrast: {per}")
+    elif prov.get("de_tables"):
+        man.skip(INCOMPLETE_PART, "de_provenance.json has no `incomplete_data` record (a DE from before "
+                                  "the flag existed)")
+    q = prov.get("quantums_tradeoff")
+    if not isinstance(q, dict):
+        return
+    file = q.get("file") or "QuantUMS_tradeoff.csv"
+    if q.get("status") == "written":
+        if os.path.isfile(os.path.join(p["de_dir"], file)):
+            man.ok(QUANTUMS_PART, f"used pgQ {(q.get('used') or {}).get('pgQ')}, eQ "
+                                  f"{(q.get('used') or {}).get('eQ')} ({q.get('cutoff_source')})")
+        else:
+            man.skip(QUANTUMS_PART, f"de_provenance.json says it was written, but {file} is not in "
+                                    f"{os.path.relpath(p['de_dir'], p['session_dir'])}")
+    else:
+        man.skip(QUANTUMS_PART, f"{q.get('status')}: {q.get('reason') or 'no reason recorded'}")
 
 
 def custom_step(p, gate):
@@ -1513,6 +1595,8 @@ def do_finalize(a):
     if man is not None:
         search_record_step(p, man)
         faims_step(p, man)
+        onoff_step(p, man)
+        quantums_step(p, man)
         if gate.get("commands_log"):          # the gate's warning, in MANIFEST.txt too
             man.warn(COMMANDS_LOG_PART, gate["commands_log"].replace("WARNING: ", "", 1))
         for level, part, note in custom_lines:
@@ -2660,15 +2744,21 @@ def search_engine(p, de_input=None, record=None):
     wf = _load(p["workflow_manifest"]) or {}
     pin = wf.get("engine") if isinstance(wf, dict) and isinstance(wf.get("engine"), dict) else {}
     res = {"engine": None, "version": None, "source": None, "note": None, "choice": c}
+    # the printed version: a container tag (Radiant's radiant-fulcrum image) is never shown as the
+    # engine's version (resolve_defaults.engine_version_text, the Methods' rule too; 2.15.1)
+    from resolve_defaults import engine_version_text
+    from make_methods import ENGINE_LABEL                # the one engine-name table
     if isinstance(record, dict) and record.get("engine"):
-        v = record.get("version")
-        return dict(res, engine=str(record["engine"]).lower(), version=str(v) if v else None,
-                    source="search_provenance.json")
+        e = str(record["engine"]).lower()
+        return dict(res, engine=e, version=engine_version_text(
+            e, record.get("version"), record.get("engine_version"), ENGINE_LABEL.get(e)),
+            source="search_provenance.json")
     if record is None and search_unchosen(c):
         return dict(res, note=c["why"])
     if pin.get("name"):
-        return dict(res, engine=str(pin["name"]).lower(),
-                    version=str(pin["version"]) if pin.get("version") else None,
+        e = str(pin["name"]).lower()
+        return dict(res, engine=e,
+                    version=engine_version_text(e, pin.get("version"), pinned=True),
                     source=ENGINE_PIN_SOURCE)
     return res
 

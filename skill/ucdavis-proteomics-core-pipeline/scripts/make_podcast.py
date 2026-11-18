@@ -133,6 +133,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 from notify_slack import REDACTED, redact as _redact    # noqa: E402  the ONE secret list
 from safe_write import sha256_file  # noqa: E402  the ONE chunked sha256
+from ai_agent import agent_label  # noqa: E402  the ONE name for the AI that ran the skill
 from report_files import SHARE_NAME, SHARE_STALE    # noqa: E402  names defined once
 from client_text import draft_history, draft_history_loose  # noqa: E402  the ONE list
 from client_text import peak_check_overclaims, peak_check_overclaims_loose  # noqa: E402  "confirmed by Skyline"
@@ -4929,7 +4930,7 @@ def how_made_md(outdir):
         return ""
     L = []
     if man.get("ai_generated") is True:
-        L.append("Claude also wrote the podcast script.")
+        L.append(f"{agent_label()} also wrote the podcast script.")
     chk = man.get("check") if isinstance(man.get("check"), dict) else {}
     mc = man.get("meaning_check") if isinstance(man.get("meaning_check"), dict) else {}
     if chk.get("status") == "PASS" and not chk.get("overridden"):

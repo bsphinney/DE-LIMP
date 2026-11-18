@@ -344,12 +344,17 @@ class RunDeRemovesContaminants(unittest.TestCase):
                                    capture_output=True, text=True)
                 self.assertEqual(p.returncode, 0, p.stderr[-1500:])
                 de = f"DE_{meth}_B.A.csv"
-                orig = {r["Protein.Group"]: float(r["logFC"])
+                # a protein in one group only has no logFC (NA); it must be NA in both
+                lfc = lambda r: None if r["logFC"] in ("", "NA") else float(r["logFC"])  # noqa: E731
+                orig = {r["Protein.Group"]: lfc(r)
                         for r in read_csv(os.path.join(self.out(key), de))}
-                again = {r["Protein.Group"]: float(r["logFC"])
+                again = {r["Protein.Group"]: lfc(r)
                          for r in read_csv(os.path.join(rerun, "de_results_rerun", de))}
                 self.assertEqual(set(orig), set(again))
-                self.assertLess(max(abs(orig[k] - again[k]) for k in orig), 1e-9)
+                self.assertEqual({k for k in orig if orig[k] is None},
+                                 {k for k in again if again[k] is None})
+                self.assertLess(max(abs(orig[k] - again[k]) for k in orig if orig[k] is not None),
+                                1e-9)
 
     def test_detection_matrix_matches_the_expression_matrix_and_the_qc_totals(self):
         for key in ("dpc", "maxlfq"):

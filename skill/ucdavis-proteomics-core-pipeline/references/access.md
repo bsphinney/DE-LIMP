@@ -17,17 +17,17 @@ jobs** on HIVE — nothing depends on an interactive session staying open.
 - 71: HPC@UCD's `ucd-hpc` skill (anyone on a UC Davis cluster)
 - 97: hive_remote runbook (Claude Code local → HIVE over SSH)
 - 167: Keeping the skill current (hive_remote)
-- 288: Data already on a network drive (check BEFORE any upload)
-- 322: Windows (Git Bash)
-- 343: HIVE host key (first contact)
-- 357: Core staff — submission workflow prerequisites
-- 398: Rebuild on HIVE (non-Core users) — exact steps, no guessing
-- 432: Notes
-- 463: On HIVE: the login node or a compute node (golden rule 3, step 0a)
-- 512: Step 0a: the questions, the check and the modes
-- 591: Step 0: is this skill current? (every conversation)
-- 734: Step 1: locating the raw files
-- 739: Step 1: a path the user gave on a network drive
+- 289: Data already on a network drive (check BEFORE any upload)
+- 323: Windows (Git Bash)
+- 344: HIVE host key (first contact)
+- 358: Core staff — submission workflow prerequisites
+- 399: Rebuild on HIVE (non-Core users) — exact steps, no guessing
+- 433: Notes
+- 464: On HIVE: the login node or a compute node (golden rule 3, step 0a)
+- 513: Step 0a: the questions, the check and the modes
+- 595: Step 0: is this skill current? (every conversation)
+- 739: Step 1: locating the raw files
+- 744: Step 1: a path the user gave on a network drive
 <!-- /contents -->
 
 ## Step 0a asks two questions (Core staff, three) → pick a mode
@@ -180,7 +180,7 @@ three in one SSH call and prints one JSON object: `status`, `local`, `hive`, `re
 |---|---|---|
 | 0 | `in_step` | Nothing, unless `say` is set: this computer is behind the release. Relay it. (`release_state` `untrusted`: the release file is not an admin's, and is ignored.) |
 | 0 | `skipped` | Nothing, and say nothing: no HIVE login, and no `--mode hive_remote` (local mode, no HIVE). |
-| 3 | `hive_missing`, `hive_behind`, `hive_differs` | Run `next` (`hive_exec.sh --put-skill`), then the check again. |
+| 3 | `hive_missing`, `hive_behind`, `hive_differs` | Ask the user first (2.15.1): it replaces the scripts HIVE jobs run. On yes, run `next` (`hive_exec.sh --put-skill`), then the check again. |
 | 4 | `hive_ahead` | Stop. Relay `say`: update the plugin here, or, for an unreleased build on HIVE, ask the user which to keep. |
 | 5 | `no_login`, `unreachable`, `local_unknown` | One line saying the check could not run; carry on. `no_login`: run `check_access.sh`, which saves the login. |
 | 6 | as 3 | `jobs` of the user's `jobs_total` SLURM jobs use the copy, or squeue answered with an error: do not put it now. Relay `say`, and ask the user whether to put it now or after they finish. |
@@ -200,8 +200,9 @@ three in one SSH call and prints one JSON object: `status`, `local`, `hive`, `re
   files, count as `hive_differs`, and this computer's copy wins, because its SKILL.md is the one
   running. **Different files** means a `cksum` digest over `plugin.json` and every file in this
   computer's `scripts/`, taken the same way on both sides. Files an older put left on HIVE, which
-  this computer no longer has, are not counted (`--put-skill` never deletes).
-- **Running jobs.** Before an automatic put, the check lists this user's SLURM jobs
+  this computer no longer has, are not counted; `--put-skill` deletes them (2.15.1: `rsync --delete`,
+  only inside the copy's own `scripts/` and `.claude-plugin/`).
+- **Running jobs.** Before a put (never automatic since 2.15.1: the user is asked), the check lists this user's SLURM jobs
   (`squeue -u <user> -o %o`, the batch script of each) and counts the ones whose script names the
   copy's `scripts/`: `$HOME/proteomics-pipeline/scripts/` expanded, its `pwd -P` form, or
   literally `~/`, `$HOME/` or `${HOME}/proteomics-pipeline/scripts/`. A job's end-of-job steps
@@ -511,9 +512,12 @@ your own copy in your HIVE home. Run all of this **on HIVE** (via `hive_exec.sh`
 
 ## Step 0a: the questions, the check and the modes
 
-**Claude Code runs locally on the user's machine.** Heavy steps either run locally or
-are driven on **HIVE over SSH with the user's private key** — they do NOT run Claude
-Code on HIVE. Ask two questions, verify, and ask Core staff a third:
+**Claude Code usually runs on the user's own computer.** Heavy steps either run there
+(`local`) or are driven on **HIVE over SSH with the user's private key** (`hive_remote`).
+When Claude Code itself already runs on HIVE, `check_access.sh` says **`hive_local`**: every
+script runs directly on HIVE, with no `hive_exec.sh`, and compute work goes through
+`on_compute.py` or an sbatch job (never the login node). Ask two questions, verify, and ask
+Core staff a third:
 
 1. **"Do you have access to UC Davis HIVE (an account + an SSH private key)?"** If yes, ask
    where their private key is (e.g. `~/.ssh/id_ed25519`).
@@ -603,8 +607,8 @@ reload is pending), and prints one JSON object. Act on its fields in this order:
 | `up_to_date` | `true` only when `--check-update` exited 0 and HIVE's release check is not behind: the one case in which the skill may be called up to date. |
 | `relay_first` | Relay it before any other work (older than `main` or the Core's release; or the `/reload-plugins` line of `reload_needed`). |
 | `ask_update` | Ask whether to update now. Yes → `bash scripts/skill_version.sh --update`, then `/reload-plugins`, then start again. No → record that they declined, once the session exists (below). |
-| `ask` | A question for the user: HIVE has a newer build the update would not bring here (never put the older copy over it unasked), or HIVE's copy is in use by the user's jobs (put it now or after they finish). |
-| `next` | Run it at once, without asking (`hive_exec.sh --put-skill`: the user's own copy), after any question, then `--session-start` again. |
+| `ask` | A question for the user: HIVE's copy is missing, older or a different build (put this computer's copy there? 2.15.1: never unasked, since it replaces the scripts HIVE jobs run), HIVE has a newer build the update would not bring here (never put the older copy over it unasked), or HIVE's copy is in use by the user's jobs (put it now or after they finish). On yes, run the `hive_exec.sh --put-skill` it names, then `--session-start` again. |
+| `next` | Null from 2.15.1 (HIVE's copy is the `ask` above). An older script may still set it: run it only after asking. |
 | `say` | One line to relay: the move (its sentence comes first), a check that could not run, HIVE's other notes. |
 | `move` | Null, or what the move did: `status` `moved` (relay `say`; nothing else to do), `skipped` (offline, git or claude missing, Claude Desktop, or a failed try earlier today: nothing was changed; `say` gives the by-hand line in `manual`), `failed` (`say` says what happened and the by-hand line). |
 | `update`, `hive` | The two checks' own objects, each with its `exit` (`hive` is null when it did not run). |
@@ -713,8 +717,9 @@ Then, by exit code:
 
 - **exit 0** → carry on (after the update question above, when `behind_release` is true).
 - **exit 3** → `~/proteomics-pipeline` on HIVE is missing, has no `.claude-plugin/`, is older, or
-  is another build (its files differ) → run `bash scripts/hive_exec.sh --put-skill` without
-  asking (it is the user's own copy), then the check again, which must exit 0; if it does not,
+  is another build (its files differ) → ask the user first (2.15.1: it replaces the scripts HIVE
+  jobs run, so never unasked); on yes, run `bash scripts/hive_exec.sh --put-skill`, which records
+  from/to on HIVE (`.put_record`), then the check again, which must exit 0; if it does not,
   record it (`report_issue.sh`) and tell the user before going on. Relay `say` in one line.
 - **exit 4** → HIVE has a NEWER skill than this computer → stop and relay `say`. With
   `behind_release` true, that is the update question above. Otherwise HIVE holds an unreleased

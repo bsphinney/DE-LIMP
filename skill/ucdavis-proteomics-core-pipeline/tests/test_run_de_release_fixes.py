@@ -88,7 +88,8 @@ class RunDeReleaseFixes(unittest.TestCase):
     def test_de_tables_carry_per_group_detection(self):
         self.ok("dpc")
         rows = self.dpc_tables["DE_dpc_B.A.csv"]
-        self.assertEqual(list(rows[0])[-3:], ["Detected_B", "Detected_A", "Evidence"])
+        self.assertEqual(list(rows[0])[-6:], ["Detected_B", "Detected_A", "Evidence", "values_per_group",
+                                              "called_on_incomplete_data", "incomplete_tier"])
         det = {r["Protein.Group"]: r for r in self.dpc_tables["Detection_Matrix.csv"]}
         a_runs, b_runs = ["run01", "run02", "run03"], ["run04", "run05", "run06"]
         seen = set()

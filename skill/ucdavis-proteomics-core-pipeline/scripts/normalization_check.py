@@ -53,7 +53,8 @@ differently from a classic IP?); run_de.R copies it into de_provenance.json
   # in a Slurm job script add --job-exit0: a trip then exits 0 (the job is COMPLETED, not FAILED)
   # and NEEDS_DECISION.json, beside the check record, says a decision is owed
   # tripped (exit 3): show NORMALIZATION_CHECK.md, ask, then record THEIR answer -- the decision
-  # is a Core staff member's, never Claude's: --by is their HIVE login (staff.py checks it)
+  # is the person's, never Claude's: --by is a Core staff member's HIVE login (staff.py checks
+  # it); for the analyst's own analysis (not Core client work), their own login (`whoami`)
   python3 normalization_check.py decide --check <S>/output/norm_check/normalization_check.json \\
       --quantities raw|normalised --by <their HIVE login> --reason "<why, in their words>"
   # the final DE, held to the decision
@@ -68,8 +69,10 @@ fitted with different designs or on another report or conditions file; gate() re
 whose method, formula, numeric covariates or block differ (other contrasts: a warning). A check
 from before 2.12 records no design: the final DE's design is then said to be NOT CHECKED. A
 MaxLFQ DE is also held to the between-run step of the check's normalised DE: the step it asked
-for, or, for a check from before 2.14.2 (quantile, the old rule), the step this DE applies --
-run_de.R asks the gate again with it (--between-run-applied) once the report is read.
+for and, for --between-run auto, the step auto gave (check_design `between_run_applied`; 2.15.1
+changed auto for quantities no engine normalised), or, for a check from before 2.14.2 (quantile,
+the old rule), the step this DE applies -- run_de.R asks the gate again with it
+(--between-run-applied) once the report is read.
 
 MaxLFQ has no non-normalised protein quantity in a normal report (PG.MaxLFQ is normalised unless
 the search ran with --no-norm): its raw DE reads a report searched with --no-norm, given to the
@@ -623,6 +626,19 @@ def load_design(path):
 LEGACY_MAXLFQ_BETWEEN_RUN = "quantile"
 
 
+def auto_step_before_2151(applied, adapted):
+    """The step --between-run auto gave from 2.14.2 to 2.15.0 on the report a 2.15.1 DE's auto now
+    gives `applied` on (`adapted`: the report declares its own quantity -- Sage, FragPipe,
+    AlphaDIA). THE record of that old rule, for a check made then (its record has no
+    `between_run_applied`): quantile on every adapted report and on a --no-norm DIA-NN report,
+    none on DIA-NN's normalised PG.MaxLFQ. 2.15.1's auto gives median_ratio where the old rule
+    gave quantile on DIA-NN (--no-norm), and none only where the old rule gave none (DIA-NN
+    normalised, or not recorded)."""
+    if adapted or applied != "none":
+        return LEGACY_MAXLFQ_BETWEEN_RUN
+    return "none"
+
+
 def between_run_of(rec, key="requested"):
     """The between-run step a DE asked for (`key` "requested") or applied ("method"), from its
     record's own `between_run`: de_provenance.json's {method, requested, why} (build_maxlfq.R
@@ -691,6 +707,10 @@ def check_design_of(norm, raw, report_sha, report_raw_sha, conditions_sha):
         # DE reading normalised quantities is held to it (design_check)
         rec["between_run"] = between_run_of(
             dict(norm["prov"], method=norm["prov"].get("method") or d.get("method")))
+        # ... and the step that RAN (2.15.1): what auto gives can change between skill versions,
+        # so a final DE's auto is compared on the step it applies (design_check)
+        rec["between_run_applied"] = between_run_of(
+            dict(norm["prov"], method=norm["prov"].get("method") or d.get("method")), "method")
     if unverified:
         rec["files_unverified"] = unverified
     return rec
@@ -711,6 +731,23 @@ RERUN_CHECK = "run the normalisation check again with this skill"
 # design_check's `match` while a check from before 2.14.2 waits for the step auto gives
 BETWEEN_RUN_PENDING = ("between-run step not compared yet: the check was made before 2.14.2, and "
                        "what --between-run auto gives is known once the report is read")
+# ... and while any check's --between-run auto waits for the step this DE's auto applies
+AUTO_STEP_PENDING = ("between-run step not compared yet: what --between-run auto gives is known "
+                     "once the report is read")
+
+
+def auto_step_refusal(want, applied, legacy):
+    """The refusal of a final MaxLFQ DE whose --between-run auto applied another step (`applied`)
+    than the check's normalised DE's auto did (`want`; `legacy`: a check made before 2.15.1,
+    whose step is auto_step_before_2151's)."""
+    return (f"REFUSED: the normalisation check's normalised DE ran --between-run auto, which gave "
+            f"{want} on these quantities"
+            + (" (the check was made before 2.15.1, with the rule of that time)" if legacy else "")
+            + f"; this DE's --between-run auto gives {applied}. From 2.15.1 auto gives "
+            f"median_ratio on quantities no engine normalised (a --no-norm DIA-NN search, Sage) "
+            f"and no step on quantities the engine normalised. The step changes the volcano, so "
+            f"the decision was drawn about another analysis. Next step: {RERUN_CHECK} -- step "
+            f"8's commands (both check DEs, then normalization_check.py run) -- and decide again.")
 
 
 def legacy_between_run_refusal(bw, bg, applied):
@@ -737,7 +774,7 @@ def legacy_between_run_refusal(bw, bg, applied):
             f"wrong calls at 4-10 m/z.")
 
 
-def design_check(rec, design, quantities=None, applied=None):
+def design_check(rec, design, quantities=None, applied=None, adapted=False):
     """A final DE's design (run_de.R's design_request) against the check's `check_design` ->
     {"match", "warnings", "refusal"[, "between_run_pending"]}. Another method, formula, numeric
     covariate or block is refused; other contrasts are a warning; a check that recorded no design
@@ -746,7 +783,11 @@ def design_check(rec, design, quantities=None, applied=None):
     before 2.14.2 drew its volcano with LEGACY_MAXLFQ_BETWEEN_RUN, and is compared with the step
     this DE APPLIES. That is the requested one, except for auto, whose step build_maxlfq.R
     maxlfq_between_run decides once run_de.R has read the report: until run_de.R asks again with
-    it (`applied`), the answer holds "between_run_pending", the step it must equal."""
+    it (`applied`), the answer holds "between_run_pending", the step it must equal. Both asking
+    auto: the step auto APPLIED is compared too (2.15.1 changed it for quantities no engine
+    normalised) -- with the check's `between_run_applied`, or, for a check made by 2.14.2-2.15.0
+    that does not record it, auto_step_before_2151 (`adapted`: the DE's report declares its own
+    quantity)."""
     if design is None:
         return {"match": "not compared (no design given)", "warnings": [], "refusal": None}
     cd = rec.get("check_design")
@@ -786,6 +827,16 @@ def design_check(rec, design, quantities=None, applied=None):
                 f"decision, were drawn with that step, which changes it (2.14.2, I20). Run this DE "
                 f"with --between-run {bw}, or run the check again with --between-run {bg} on its "
                 f"normalised DE (step 8's commands carry it) and decide again.")}
+        elif bg == "auto":
+            legacy = not cd.get("between_run_applied")
+            if applied is None:
+                pending = cd.get("between_run_applied") or "auto"
+            else:
+                want = (auto_step_before_2151(applied, adapted) if legacy
+                        else cd["between_run_applied"])
+                if applied != want:
+                    return {"match": "differs", "warnings": [],
+                            "refusal": auto_step_refusal(want, applied, legacy)}
     want, got = list(cd.get("contrasts") or []), list(design.get("contrasts") or [])
     if want != got:
         extra = [c for c in got if c not in want]
@@ -797,7 +848,9 @@ def design_check(rec, design, quantities=None, applied=None):
     else:
         res = {"match": "matches", "warnings": [], "refusal": None}
     if pending:
-        res.update(match=f"{res['match']}; {BETWEEN_RUN_PENDING}", between_run_pending=pending)
+        res.update(match=f"{res['match']}; "
+                         f"{BETWEEN_RUN_PENDING if 'between_run' not in cd else AUTO_STEP_PENDING}",
+                   between_run_pending=pending)
     return res
 
 
@@ -869,7 +922,9 @@ MAXLFQ_RAW_NOTE = (
     "three DEs with --method dpc, which reads both quantities from this report; or, to keep "
     "MaxLFQ, search again with --no-norm (diann_parallel.py --no-norm writes "
     "no_norm_report.parquet), run the raw DE on that report, and pass it to the check as "
-    "--report-raw. SKILL.md step 8.)")
+    "--report-raw. A Sage report is not normalised by its engine, so its raw DE runs on the same "
+    "report as it is; a FragPipe report needs a search with ionquant.normalization=0. "
+    "SKILL.md step 8.)")
 
 
 def required(report, conditions, method="dpc", design=None):
@@ -1099,6 +1154,33 @@ def trips(rec):
     return out
 
 
+# The checks the default's agreement rests on (2.15.1, audit L2-2): for a normalised default the
+# three data checks B1-B3 and the normalised volcano; for a raw default B1 and the raw volcano.
+# B4 (Normalisation.Instability, DIA-NN only) is extra evidence, not required.
+CHECK_NAMES = {"factor_confound": "B1 normalisation factors vs groups",
+               "raw_shift": "B2 shift before normalisation",
+               "id_gap": "B3 identifications per group"}
+
+
+def not_assessed(rec):
+    """[what could not be assessed, with why] among the checks the default's agreement rests on.
+    A check that could not run is NOT agreement: run() asks for a decision when this is not
+    empty (until 2.15.0 a report the check could not read -- every Sage / FragPipe report -- was
+    said to have "agreed")."""
+    default = rec["default"]["quantities"]
+    keys = (("factor_confound", "raw_shift", "id_gap") if default == et.NORMALISED
+            else ("factor_confound",))
+    out = []
+    for k in keys:
+        c = rec["checks"].get(k) or {}
+        if c.get("status") == "not_assessed":
+            out.append(f"{CHECK_NAMES[k]}: not assessed ({c.get('why') or 'no reason recorded'})")
+    if not rec["volcano"].get(default):
+        out.append(f"the {default} volcano: not assessed "
+                   f"({rec['volcano_not_assessed'].get(default) or 'no DE given'})")
+    return out
+
+
 def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, report_raw=None):
     """The check. `report_raw`: the report the non-normalised DE read when it is not `report`
     (MaxLFQ: a search with --no-norm); B1-B4 read `report`, and a raw decision holds the final DE
@@ -1179,14 +1261,23 @@ def run(report, conditions, de_norm, de_raw, session=None, bait=None, out=None, 
     }
     rec["trips"] = trips(rec)
     rec["tripped"] = bool(rec["trips"])
-    rec["data_check_agrees"] = not rec["tripped"]
+    # what could not be checked is not agreement (2.15.1, audit L2-2)
+    rec["not_assessed"] = not_assessed(rec)
+    rec["data_check_agrees"] = not rec["tripped"] and not rec["not_assessed"]
     # No experiment type recorded: the default above is the skill's, not the user's, so nothing
     # is decided for them -- the check asks, whatever the data say.
-    rec["needs_decision"] = rec["tripped"] or rec_type is None
+    rec["needs_decision"] = rec["tripped"] or rec_type is None or bool(rec["not_assessed"])
+    whys = []
     if rec_type is None:
-        rec["needs_decision_why"] = ("no experiment type is recorded for this session, so there is "
-                                     "no default to apply: ask the user what kind of experiment "
-                                     "this is (experiment_type.py set) and which quantities to use")
+        whys.append("no experiment type is recorded for this session, so there is "
+                    "no default to apply: ask the user what kind of experiment "
+                    "this is (experiment_type.py set) and which quantities to use")
+    if rec["not_assessed"]:
+        whys.append("the data check could not assess " + "; ".join(rec["not_assessed"])
+                    + ", so it cannot say the default suits these data: show the volcanoes "
+                    "it has and ask the user which quantities to use")
+    if whys:
+        rec["needs_decision_why"] = "; and ".join(whys)
     if design.get("note"):
         rec["design_note"] = design["note"]
     rec["decision"] = None if rec["needs_decision"] else {
@@ -1220,6 +1311,9 @@ def _anomaly_counts(rec):
     etype = (rec.get("experiment_type") or {}).get("type")
     out = {}
     for k in (et.NORMALISED, et.RAW):
+        if not (rec.get("volcano") or {}).get(k):
+            out[k] = None                    # no DE of this version: not assessed, never 0
+            continue
         if k == et.RAW and etype in RAW_VOLCANO_EXPECTED:
             out[k] = 0
             continue
@@ -1232,20 +1326,32 @@ def _recommend(rec):
     default = (rec.get("default") or {}).get("quantities") or et.NORMALISED
     other = et.RAW if default == et.NORMALISED else et.NORMALISED
     etype = (rec.get("experiment_type") or {}).get("type")
-    if not rec.get("tripped") and etype is not None:
+    agrees = rec.get("data_check_agrees", not rec.get("tripped"))
+    if agrees and etype is not None:
         return default, "the default for this experiment type; the data check agreed"
     n = _anomaly_counts(rec)
     fc = (rec.get("checks") or {}).get("factor_confound") or {}
+
+    def said(k):
+        return "not assessed" if n[k] is None else f"{n[k]} anomalies"
+    both = n[default] is not None and n[other] is not None
     if etype is None:
+        if not both:
+            return default, (f"no experiment type is recorded, and the volcanoes cannot decide "
+                             f"({default}: {said(default)}; {other}: {said(other)}); ask what "
+                             "kind of experiment this is before choosing")
         pick = other if n[default] > n[other] else default
         return pick, (f"no experiment type is recorded, so this follows the volcanoes "
                       f"({n[pick]} anomalies vs {n[other if pick == default else default]}); "
                       "ask what kind of experiment this is before choosing")
-    if n[default] >= n[other] + CLEARLY_WORSE:
+    if both and n[default] >= n[other] + CLEARLY_WORSE:
         return other, (f"the default for this type is {default}, but its own volcano is clearly "
                        f"the worse one ({n[default]} anomalies vs {n[other]})")
-    why = (f"the default for this experiment type ({n[default]} volcano anomalies vs "
-           f"{n[other]} for {other})")
+    why = (f"the default for this experiment type ({default}: {said(default)} in the volcano; "
+           f"{other}: {said(other)})")
+    if rec.get("not_assessed"):
+        why += ("; parts of the data check were not assessed (" + "; ".join(rec["not_assessed"])
+                + "), so this is the type's default, not a data-checked one")
     if default == et.NORMALISED and fc.get("large_and_confounded"):
         why += (f"; but the normalisation factors are {fc.get('gap_fold')}-fold apart and follow "
                 "the groups -- ask whether one group carries less material by design (an "
@@ -1347,14 +1453,22 @@ def summary_md(rec):
          f"- **Bait:** " + (f"{rec['bait']} ({rec.get('bait_source') or 'source not recorded'})"
                             if rec.get("bait") else
                             f"none ({rec.get('bait_source') or 'not recorded'})"),
-         f"- **Data check:** " + ("agreed with the default" if not rec["tripped"] else
-                                  "**TRIPPED -- stop and ask before the final DE**"), ""]
+         # both labels when both hold: a trip never hides that parts were not assessed (2.15.1)
+         f"- **Data check:** " + ("**TRIPPED and NOT FULLY ASSESSED -- stop and ask before the "
+                                  "final DE**" if rec["tripped"] and rec.get("not_assessed") else
+                                  "**TRIPPED -- stop and ask before the final DE**"
+                                  if rec["tripped"] else
+                                  "**NOT FULLY ASSESSED -- ask before the final DE**"
+                                  if rec.get("not_assessed") else
+                                  "agreed with the default"), ""]
     if rec["experiment_type"].get("reconcile"):
         L[-1:-1] = [f"- **Ask the user (the submission):** {rec['experiment_type']['reconcile']}"]
     if rec.get("needs_decision_why"):
         L[-1:-1] = [f"- **Ask the user:** {rec['needs_decision_why']}"]
     for t in rec["trips"]:
-        L.append(f"  - {t}")
+        L.append(f"  - tripped: {t}")
+    for t in list(rec.get("not_assessed") or []):
+        L.append(f"  - not assessed: {t}")
     if rec.get("design_note"):
         L += ["", f"- **Design:** {rec['design_note']}"]
     cd = rec.get("check_design") if isinstance(rec.get("check_design"), dict) else {}
@@ -1431,10 +1545,11 @@ def summary_md(rec):
                 or f"{d['quantities']} quantities -- {d.get('by')}: {d.get('reason')}")
         L.append(f"**Decision:** {said}")
     else:
-        L.append("**Decision: not made.** Show this to the Core staff member, ask which quantities "
-                 "to use -- the decision is theirs, never Claude's -- and record their answer: "
+        L.append("**Decision: not made.** Show this to the person the analysis is for (Core client "
+                 "work: the Core staff member), ask which quantities to use -- the decision is "
+                 "theirs, never Claude's -- and record their answer: "
                  "`normalization_check.py decide --check <this json> --quantities raw|normalised "
-                 "--by <their HIVE login> --reason \"<why, in their words>\"`.")
+                 "--by <their login> --reason \"<why, in their words>\"`.")
     return "\n".join(L) + "\n"
 
 
@@ -1459,31 +1574,84 @@ def decision_staff_record(path, rec):
     """Where `decide` records who decided -> (the file, as the check record names it): the
     session's logs/ (the session the check ran with, else the one its folder is in), else beside
     the check."""
-    here = os.path.dirname(os.path.abspath(path))
-    s = rec.get("session") or (os.path.dirname(os.path.dirname(here))
-                               if here.endswith(os.path.join("output", "norm_check")) else None)
+    s = check_session(path, rec)
     if s:
         return staff_record_path(s), os.path.join("logs", STAFF_RECORD)
-    return os.path.join(here, STAFF_RECORD), STAFF_RECORD
+    return os.path.join(os.path.dirname(os.path.abspath(path)), STAFF_RECORD), STAFF_RECORD
+
+
+def check_session(path, rec):
+    """The session a check belongs to: the one it ran with (--session), else the one its folder
+    (<S>/output/norm_check) is in, else None."""
+    here = os.path.dirname(os.path.abspath(path))
+    return rec.get("session") or (os.path.dirname(os.path.dirname(here))
+                                  if here.endswith(os.path.join("output", "norm_check")) else None)
+
+
+def own_analysis_signer(by, rec, path):
+    """2.15.1: may `by` record the decision as the ANALYST, not as Core staff? -> a check dict
+    shaped like staff.check_by's, or None. Only for the analyst's own analysis: the check belongs
+    to a session whose records say nothing of Core work (submission_report.core_work: no CoreOmics
+    submission, no Core client mark, no --submission/--internal), and `by` is the login of the
+    account running this command, by uid (never $USER, which anyone can set) -- what `whoami`
+    prints where the check runs -- and not an agent's name. Core client work stays staff-only
+    (staff.check_by), and so does a check with no session to ask."""
+    s = check_session(path, rec)
+    if not s:
+        return None
+    import submission_report                     # not at the top: it imports session.py
+    if submission_report.core_work(s):
+        return None
+    me = staff._uid_login()
+    login = (by or "").strip().lower()
+    if not me or login != me.lower() or staff.is_agent_like(login):
+        return None
+    return {"ok": True, "by": login, "error": None, "warning": None,
+            "staff_file": staff.staff_file(),
+            "checked": ("the analyst's own login, for their own analysis (this session is not "
+                        "Core client work): recorded as the user, not as Core staff")}
+
+
+def signer(by, rec, path):
+    """Who signs a `decide` -> (check, the role client documents name). Core staff on the list
+    (staff.check_by; with no usable list, a login that is not an agent's name, as before) sign as
+    staff.ROLE. Anyone else only for their own analysis (own_analysis_signer), as
+    staff.USER_ROLE. Otherwise staff.check_by's refusal stands."""
+    c = staff.check_by(by)
+    if c["ok"]:
+        if c["warning"]:
+            print(c["warning"], file=sys.stderr)
+        return c, staff.ROLE
+    own = own_analysis_signer(by, rec, path)
+    if own:
+        return own, staff.USER_ROLE
+    hint = ""
+    if not staff.is_agent_like(by or "") and check_session(path, rec):
+        hint = (" (For your own analysis -- one that is not Core client work -- pass your own "
+                "login: what `whoami` prints where this check runs.)")
+    raise ValueError(c["error"] + hint)
 
 
 def decide(path, quantities, by, reason):
-    """Record a Core staff member's decision -- theirs, never Claude's: --by is their HIVE login
-    (staff.require). The check record (and so de_provenance.json, the Methods, the zip) names the
-    role; their name and login go to the staff-only record."""
+    """Record a person's decision -- theirs, never Claude's: --by is their login (signer). Core
+    client work: a Core staff member's HIVE login (staff.check_by). The analyst's own analysis
+    (not Core client work): their own login too (own_analysis_signer), named as "the user". The
+    check record (and so de_provenance.json, the Methods, the zip) names the role; their name and
+    login go to the staff-only record."""
     if quantities not in (et.RAW, et.NORMALISED):
         raise ValueError("--quantities must be raw or normalised")
     if not (reason and reason.strip()):
         raise ValueError("--reason is required: why they chose it, in their words")
     rec = load(path)
-    c = staff.require(by)
+    c, role = signer(by, rec, path)
     at = staff.now()
     where, named = decision_staff_record(path, rec)
     staff.append(where, {"event": "decide", "by": c["by"], "staff_check": c["checked"],
-                         "account": staff.login(), "at": at, "quantities": quantities,
+                         "role": role, "account": staff.login(), "at": at,
+                         "quantities": quantities,
                          "reason": reason.strip(), "check": os.path.abspath(path)})
-    rec["decision"] = {"quantities": quantities, "source": "user", "by": staff.ROLE,
-                       "reason": reason.strip(), "statement": statement(quantities, reason),
+    rec["decision"] = {"quantities": quantities, "source": "user", "by": role,
+                       "reason": reason.strip(), "statement": statement(quantities, reason, role),
                        "at": at, "default_was": rec["default"]["quantities"],
                        "data_check_tripped": rec["tripped"],
                        # the person, by name and login: staff-only, never delivered
@@ -1492,12 +1660,14 @@ def decide(path, quantities, by, reason):
     return rec
 
 
-def gate(path, quantities, report=None, conditions=None, design=None, applied=None):
+def gate(path, quantities, report=None, conditions=None, design=None, applied=None,
+         adapted=False):
     """(ok, message, record) for run_de.R: the DE may read only the decided quantities, of the
     report and conditions the decision was made on (their sha256, recorded by run()), fitted with
     the design the check's DEs used (`design`: run_de.R's design_request; design_check).
     `applied`: the between-run step the MaxLFQ DE applied (build_maxlfq.R), which run_de.R passes
-    when the first answer said design_check's between_run_pending."""
+    when the first answer said design_check's between_run_pending, and `adapted` (the report
+    declares its own quantity) with it."""
     rec = load(path)
     # MaxLFQ's non-normalised DE reads its own (--no-norm) report: a raw DE is held to that one
     rkey = "report_raw" if quantities == et.RAW and rec.get("report_raw_sha256") else "report"
@@ -1514,7 +1684,7 @@ def gate(path, quantities, report=None, conditions=None, design=None, applied=No
                            + f", not on this DE's {what} {given} (sha256 differs). Run the check "
                            "again on this DE's report and conditions -- a decision about one "
                            "report never authorises another."), rec
-    dc = design_check(rec, design, quantities, applied)
+    dc = design_check(rec, design, quantities, applied, adapted)
     if dc["refusal"]:
         return False, dc["refusal"], rec
     d = rec.get("decision")
@@ -1528,8 +1698,11 @@ def gate(path, quantities, report=None, conditions=None, design=None, applied=No
                        f"({d['by']}: {d['reason']}), and this DE asked for {quantities}. Run it "
                        f"with --quantities {d['quantities']}, or record a new decision -- never a "
                        "silent switch."), rec
+    said = (["tripped: " + "; ".join(rec["trips"])] if rec["tripped"] else []) \
+        + (["not fully assessed: " + "; ".join(rec["not_assessed"])]
+           if rec.get("not_assessed") else [])
     return True, (f"{quantities} quantities, as decided ({d['by']}); data check "
-                  + ("agreed" if not rec["tripped"] else "tripped: " + "; ".join(rec["trips"]))
+                  + (" and ".join(said) or "agreed")
                   + f"; design {dc['match']}"), rec
 
 
@@ -1552,12 +1725,14 @@ def main():
                         "the job FAILED, which a watcher cannot tell from a crash). The question "
                         "is still said on stderr and left in NEEDS_DECISION.json beside the "
                         "check record, which watch_run.sh and session.py status read")
-    d = sub.add_parser("decide", help="record a Core staff member's decision (theirs, never "
-                                      "Claude's)")
+    d = sub.add_parser("decide", help="record a person's decision (theirs, never Claude's): Core "
+                                      "staff for Core client work; the analyst for their own")
     d.add_argument("--check", required=True)
     d.add_argument("--quantities", required=True, choices=(et.RAW, et.NORMALISED))
-    d.add_argument("--by", required=True, help="their HIVE login, listed in the Core's staff file "
-                                               "(staff.py)")
+    d.add_argument("--by", required=True, help="their login: a Core staff member's HIVE login, "
+                                               "listed in the Core's staff file (staff.py); for "
+                                               "your own analysis (not Core client work), your "
+                                               "own login (what `whoami` prints here)")
     d.add_argument("--reason", required=True, help="why, in their words -- shown to the client, "
                                                    "so no names")
     k = sub.add_parser("ack-legacy", help="a DE from before 2.10 (no check record) stands: let "
@@ -1575,8 +1750,10 @@ def main():
     g.add_argument("--between-run-applied",
                    help="the between-run step the MaxLFQ DE applied (build_maxlfq.R's "
                         "between_run method), once it has read the report: run_de.R asks again "
-                        "with it when the first answer had between_run_pending (a check made "
-                        "before 2.14.2)")
+                        "with it when the first answer had between_run_pending")
+    g.add_argument("--adapted-report", action="store_true",
+                   help="with --between-run-applied: the DE's report declares its own quantity "
+                        "(an adapter's: Sage, FragPipe, AlphaDIA), for a check made before 2.15.1")
     nn = sub.add_parser("no-norm", help="did the search behind a report run with --no-norm, by "
                                         "its provenance? (run_de.R's MaxLFQ)")
     nn.add_argument("--report", required=True)
@@ -1631,8 +1808,8 @@ def main():
         else:
             design = load_design(a.design_json)
             ok, msg, rec = gate(a.check, a.quantities, a.report, a.conditions, design,
-                                a.between_run_applied)
-            dc = design_check(rec, design, a.quantities, a.between_run_applied)
+                                a.between_run_applied, a.adapted_report)
+            dc = design_check(rec, design, a.quantities, a.between_run_applied, a.adapted_report)
             print(json.dumps({"ok": ok, "message": msg, "record": rec,
                               "design_match": dc["match"], "warnings": dc["warnings"],
                               "between_run_pending": dc.get("between_run_pending")}))

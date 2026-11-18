@@ -7,25 +7,28 @@ bundle's `de.method` says `maxlfq`).
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 31: Invocation
-- 103: `--method dpc` (limpa DPC-Quant + limma) — DE-LIMP default, use with DIA-NN
-- 122: `--method maxlfq` (MaxLFQ + limma) — use with Sage/FragPipe (or DIA-NN MaxLFQ)
-- 203: DE-input contract (§8.3)
-- 208: Design matrix
-- 260: Paired / repeated designs — `--block <column>`
-- 380: Method choice — limpa/DPC is the default
-- 416: Normalised or non-normalised quantities: the experiment type and the data check
-- 516: Contaminant filter (both paths, on by default)
-- 605: Coverage filter (maxlfq path)
-- 619: Provenance (self-describing — DE-LIMP architectural rule #1)
-- 632: Top-protein violins (`make_figures.R` → `violin_top_<contrast>.png`)
-- 663: Citations (verified June 2026)
-- 681: Less-used flags
-- 685: Step 8: the normalisation check and the final DE
-- 787: Step 8: blocks and numeric covariates
-- 820: Step 8: keratin samples and contaminants
-- 856: Step 8: the method, what `run_de.R` writes, QuantUMS
-- 928: 8b. Figures, and what counts as significant (step 8b)
+- 34: Invocation
+- 117: `--method dpc` (limpa DPC-Quant + limma) — DE-LIMP default, use with DIA-NN
+- 136: `--method maxlfq` (MaxLFQ + limma) — use with Sage/FragPipe (or DIA-NN MaxLFQ)
+- 317: DE-input contract (§8.3)
+- 322: Design matrix
+- 374: Paired / repeated designs — `--block <column>`
+- 494: Method choice — limpa/DPC is the default
+- 530: Normalised or non-normalised quantities: the experiment type and the data check
+- 630: Contaminant filter (both paths, on by default)
+- 719: Coverage filter (maxlfq path)
+- 741: On/off proteins (maxlfq path only)
+- 782: Calls on incomplete data (every route)
+- 807: QuantUMS cutoff trade-off (maxlfq path only)
+- 835: Provenance (self-describing — DE-LIMP architectural rule #1)
+- 848: Top-protein violins (`make_figures.R` → `violin_top_<contrast>.png`)
+- 879: Citations
+- 899: Less-used flags
+- 903: Step 8: the normalisation check and the final DE
+- 1013: Step 8: blocks and numeric covariates
+- 1046: Step 8: keratin samples and contaminants
+- 1082: Step 8: the method, what `run_de.R` writes, QuantUMS
+- 1159: 8b. Figures, and what counts as significant (step 8b)
 <!-- /contents -->
 
 ## Invocation
@@ -34,7 +37,7 @@ bundle's `de.method` says `maxlfq`).
 Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
         --metadata conditions.csv --method {dpc|maxlfq} --outdir de_results \
         [--contrasts "B-A,C-A"] [--q-cutoff 0.01] [--eq-cutoff 0] [--pgq-cutoff 0] \
-        [--coverage-min 0.5] [--logfc 1.0] [--adjp 0.05] \
+        [--coverage-min 0.5] [--onoff-min-n 2] [--logfc 1.0] [--adjp 0.05] \
         [--fasta-meta search.fasta.meta.json] [--keep-contaminants] \
         [--numeric-covariates Covariate1[,Covariate2]] \
         [--block Mouse [--block-scope within|all] [--block-effect auto|fixed|random]] \
@@ -44,7 +47,11 @@ Rscript scripts/run_de.R --input report.parquet [--format parquet|tsv] \
   QuantUMS quality filters on `Empirical.Quality` and `PG.MaxLFQ.Quality` (0 = off, the
   default: they are the user's call; `de_provenance.json` records each as applied).
 - `--coverage-min` (MaxLFQ only): the fraction of samples a protein must be quantified in to
-  be tested.
+  be tested -- of all samples, OR of the runs of any one group (2.15.1; below, "Coverage filter").
+- `--onoff-min-n` (MaxLFQ only, default 2): samples (runs, without a `Sample` column) a protein needs
+  in the one group that has it to count as on/off (see "On/off proteins" below). Refused with `--method dpc`.
+- `--no-quantums-tradeoff` (MaxLFQ only): skip the QuantUMS trade-off re-fits (see "QuantUMS cutoff
+  trade-off"); the skip is recorded.
 - `--fasta-meta` (`fetch_fasta.py`'s sidecar) tells the contaminant step whether real
   proteins sat in the database only as `Cont_` entries, which the removal would then take out
   too. `--keep-contaminants` quantifies and tests `Cont_` entries with the sample proteins
@@ -67,10 +74,17 @@ effect size, and it is reported descriptively ("N of the significant proteins ar
 reported claim identical to the hypothesis `eBayes`/`topTable` actually tested
 (H0: log2FC = 0). A post-hoc `|logFC|` cut would assert "changed by at least Nx" while
 the FDR only covers "changed at all" — and because the observed fold change is a point
-estimate, proteins whose true effect is below the line pass it routinely. If a genuine
-fold-change threshold is ever wanted, use `limma::treat()` + `topTreat()`, whose interval
-null tests it properly; note that `treat` is far more stringent than the same cut applied
-post hoc, so limma recommends a *small* threshold there (fc 1.1–1.5, not 2).
+estimate, proteins whose true effect is below the line pass it routinely.
+
+**When the user asks for a fold-change cutoff** (lane4 M23): `run_de.R` has no fold-change test
+(no `limma::treat` option) and never filters on fold change. Tell them so in these words: the
+significant list is the proteins whose change is statistically supported at the FDR they set;
+`--logfc <x>` moves the reference line on the volcano and the descriptive count ("N of the
+significant proteins are also ≥ x-fold"), which you may report; a list cut at an observed fold
+change would claim more than the test supports. A genuine fold-change test (`limma::treat()` +
+`topTreat()`, an interval null, McCarthy & Smyth 2009) is not part of this skill; if they need
+one, say it is a separate analysis, and that limma recommends a *small* threshold there (fc
+1.1–1.5, not 2) because it is far more stringent than the same cut applied afterwards.
 
 **A protein measured in neither group of a contrast is not tested in it (2.12.0).** With more
 than two groups, a protein can be measured only in groups a contrast does not compare (seen in
@@ -124,30 +138,44 @@ missingness, then mean) in 1.4. On the mouse-brain IP cohort v2 that moved |logF
 pivot `PG.MaxLFQ` to a protein×run matrix, log2, the between-run step below, then
 `lmFit → contrasts.fit → eBayes → topTable(BH)`. NAs are left in place; limma drops them per row.
 
-**The between-run step** (`run_de.R --between-run auto|none|quantile|median`, default `auto`;
+**The between-run step** (`run_de.R --between-run auto|none|quantile|median|median_ratio`, default `auto`;
 `--method maxlfq` only). One rule decides it, `build_maxlfq.R maxlfq_between_run()`, and the
 descriptor records it (`de_provenance.json` `between_run`: the method, why, what was asked):
 
 | report | `auto` gives | why |
 |---|---|---|
 | DIA-NN, `PG.MaxLFQ` normalised by DIA-NN | **none** | it already carries DIA-NN's cross-run normalisation; a quantile step on top gave 61% wrong calls on the PXD063416 4 m/z benchmark (2.14.1 and earlier did that) |
-| DIA-NN searched with `--no-norm` | quantile (`limma::normalizeBetweenArrays`) | the only between-run normalisation |
+| DIA-NN searched with `--no-norm` | **median_ratio** (2.15.1; quantile up to 2.15.0) | no engine normalised these quantities, so the same step as Sage's below. On real `--no-norm` PXD063416 data quantile made 46–72% of the calls wrong at 4–10 m/z; `median_ratio` 3.7–11.6% (below) |
 | DIA-NN, whether DIA-NN normalised NOT RECORDED | none | DIA-NN normalises by default; the Methods say NOT RECORDED [confirm] |
-| an engine's declared quantities (Sage, FragPipe, AlphaDIA, Radiant) | quantile | unchanged from 2.14.1; whether to change it is Brett's decision (below) |
+| an engine's declared quantities that the engine normalised (`engine_normalised: true`: FragPipe with `ionquant.normalization=1`, directLFQ, AlphaDIA with `normalize_directlfq: true`) | **none** | already normalised between runs; a second step is the pattern that broke DIA-NN's (above) |
+| an engine's declared quantities that the engine did NOT normalise (`engine_normalised: false`: Sage's LFQ, FragPipe with `ionquant.normalization=0`) | **median_ratio** | the only between-run step; location only (below) |
+| an engine's declared quantities, whether normalised NOT RECORDED (an older report, Radiant) | median_ratio | the Methods say NOT RECORDED [confirm] |
 | `--quantities raw` | none | any other `--between-run` is refused |
 
-`quantile`, `median` (each run's median log2 set to the median of the run medians) and `none`
-can be asked for explicitly; the Methods then say "chosen for this DE".
+`quantile`, `median` (each run's median log2 set to the median of the run medians),
+`median_ratio` and `none` can be asked for explicitly; the Methods then say "chosen for this DE".
 
-**Already-normalised engine quantities still get a quantile step (2.15; not benchmarked).**
-directLFQ (its own between-sample normalisation, checked by the guard), IonQuant's MaxLFQ (with
-IonQuant's cross-run normalisation, `ionquant.normalization=1` in FragPipe's workflows) and
-AlphaDIA's quantities are already normalised between runs, yet `auto` adds a quantile step on top
-of them, as it does for every declared quantity. That is the pattern that gave 61–77% wrong calls
-on DIA-NN's normalised `PG.MaxLFQ` (above). Its effect on these engines was not benchmarked; it
-is planned for 2.16, and the default is unchanged until then. The Methods name both steps. To
-skip the second one for a study whose proteome may shift as a whole, give `--between-run none`
-and say so to the user.
+**`median_ratio`** (2.15.1): each run is shifted by the median, over the proteins quantified in
+every run (or, with fewer than 50 of those, in at least half the runs), of its log2 ratio to that
+protein's median across runs (the median-of-ratios idea of DESeq2 and MaxLFQ's pairwise ratios,
+on log2 protein values). It changes each run's location only, never the shape of its
+distribution, and it is fitted on proteins measured everywhere, so missing low-abundance values
+do not move it. On synthetic data (2026-11-17; 4 vs 4, 2,000 proteins, intensity-dependent
+missing values, 8 seeds; false-discovery proportion among significant calls) it gave: 10% of
+proteins up 2-fold 7% (quantile 9%); 25% up 2.8-fold 25% (quantile 49%); 30% down 17%
+(quantile 32%). Where everything else fails -- 40% of the proteome up 4-fold -- every global step
+is wrong (53-54%) and only no step is right; the lopsided-volcano guard below is what catches that
+case. On real data it was measured on DIA-NN `--no-norm` quantities (below); a Sage search of
+the same benchmark has not been measured yet.
+
+**Already-normalised engine quantities get no second step (2.15.1).** Up to 2.15.0 `auto` added a
+quantile step on top of directLFQ, IonQuant's normalised MaxLFQ and AlphaDIA's quantities -- the
+pattern that gave 61–77% wrong calls on DIA-NN's normalised `PG.MaxLFQ` (above). Each adapter now
+declares `engine_normalised` from the engine's own record (fragpipe.workflow, frozen_config.yaml;
+Sage's LFQ has no cross-run normalisation), and `auto` follows the table above. The Methods name
+the engine's step and the DE's. For a study whose proteome may shift as a whole, give
+`--between-run none` and say so to the user. The lopsided-volcano guard
+(`normalization_check.py`) stays on every route.
 
 **What the benchmark measured** (PXD063416, 2.14.2's I20 re-score; wrong calls among the
 significant ones at 2 / 4 / 6 / 10 m/z). On DIA-NN's normalised `PG.MaxLFQ`, a quantile step on
@@ -158,16 +186,88 @@ quantile), and no step 3.4 / 5.5 / 18 / 30%. So the harm is mainly the quantile 
 normalising twice: a mixed-species (HYE) benchmark, where whole species shift between runs, breaks
 the assumption every between-run step makes, and at 4 m/z quantile was about 8× worse than no
 step. No step was safe at 6 and 10 m/z. A real study whose proteome shifts as a whole is the same
-adversarial case. The engines' declared quantities keep quantile for now; changing that default
-is Brett's decision.
+adversarial case. That is why quantities no engine normalised get the location-only
+`median_ratio` step, not quantile, from 2.15.1.
+
+**`median_ratio` on the same benchmark** (2.15.1; measured on HIVE 2026-11-17, re-scored with
+2.14.2's scorer; `audit_20261117/hive_checks/a_i20`). On DIA-NN's `--no-norm` quantities, wrong
+calls among the significant ones at 2 / 4 / 6 / 10 m/z (adj.P < 0.05):
+
+| step on `--no-norm` quantities | 2 m/z | 4 m/z | 6 m/z | 10 m/z |
+|---|---:|---:|---:|---:|
+| `median_ratio` (auto from 2.15.1) | 3.9% | 3.7% | **11.6%** | 3.3% |
+| quantile (auto up to 2.15.0) | 5.5% | 46.3% | 71.7% | 69.3% |
+| none | 3.4% | 5.5% | 18.1% | 29.8% |
+| *for reference:* DIA-NN's own normalisation, no step (the DIA-NN default) | 3.3% | 4.5% | 6.4% | 4.4% |
+
+It is far better than quantile at every window and better than no step at 4, 6 and 10 m/z
+(at 2 m/z no step is slightly better). **6 m/z is its weak window:** 198 of 1,702 calls wrong,
+above the 10% this benchmark was held to and about twice DIA-NN's own normalisation there. It
+does not beat DIA-NN's normalisation, so a DIA-NN search keeps it (no `--no-norm`) unless there
+is a reason not to. The benchmark is **adversarial by design**: 16–19% of the tested proteins,
+all yeast, go 3-fold up and nothing goes down, the one-sided change that moves every global step
+(the factors' bias above); a typical study is kinder, and a study that really shifts one way is
+what the lopsided-volcano guard is for. Under the 1.5-fold rule `median_ratio` is at most 1.2%
+wrong at every window. `--between-run quantile` (or `none`) can still be asked for.
+Analyses made before 2.15.1 keep what they ran: `reproduce.sh` passes the step the DE applied
+(`de_provenance.json` `between_run.method`), never `auto`; and a final DE whose `auto` now
+gives another step than the normalisation check's normalised DE had is refused, with "run the
+check again" (`normalization_check.py` compares the steps that ran: `check_design`
+`between_run_applied`, or, for a check made before 2.15.1, the old rule).
 
 **A Sage report is not MaxLFQ, and is not described as MaxLFQ.** `adapt_sage` writes one row
 per **peptide** × run, and declares that in the report itself (parquet metadata
-`delimp.quantity.*`: level `peptide`, what the value is, Sage's FDR, the citation).
-`build_maxlfq.R` takes the highest row per (protein, run), so each protein's value is its
-single most intense peptide. `maxlfq_descriptor()` turns the declaration into the one
+`delimp.quantity.*`: level `peptide`, what the value is, Sage's FDR, the citation,
+`engine_normalised: false`). From 2.15.1 (audit L2-4, L2-6) `adapt_sage` also:
+- keeps protein groups at Sage's picked-protein q-value ≤ 0.01 (`results.sage.parquet`
+  `protein_q`, as the identifications-only route reports it). Without that column (an older
+  Sage) nothing is filtered and the record and Methods say so;
+- groups proteins by parsimony (`run_search.SAGE_SHARED_RULE`, one function:
+  `sage_protein_groups`), so one protein is never tested as two rows and no shared peptide is
+  thrown away: proteins identified by the same peptides are one group; a protein whose peptides
+  all belong to another group is listed in that group (a subset protein); a peptide still shared
+  between groups is quantified only in the group with the most peptides (a razor peptide, as in
+  MaxQuant; ties: more peptides of its own, then the first accession). A group left with no
+  peptide is not quantified and is **named** in `sage_groups_not_quantified.csv` beside the
+  report (delivered with the search output; one row per group, with the groups its peptides
+  went to -- where to look for a protein that has no DE row) and in `sage_adapt.json`
+  `protein_grouping` (`groups_not_quantified_list`), and the adapter prints the count. Peptides shared with a contaminant entry are left to the contaminant step. Until
+  the 2.15.1 review the rule dropped shared peptides instead, and protein families with no
+  entry-unique peptide (histones, GSTM1/2/4, GH1/GH2/CSH) vanished from the DE;
+- marks each value `Identified.In.Run` (1 = the run's own rank-1 PSM at spectrum- and
+  peptide-q ≤ 0.01; 0 = not identified by MS2 in that run). What Sage's LFQ does (v0.14.7
+  `crates/sage/src/lfq.rs`; [docs](https://sage-docs.vercel.app/docs/results/lfq)): it takes the
+  peptides at peptide-q ≤ 0.01 over all runs, aligns retention times across runs, and
+  **integrates real MS1 signal in every run** (isotope traces within `ppm_tolerance`, in an RT
+  window around the aligned retention time, scored by spectral angle), match-between-runs style.
+  So a value with `Identified.In.Run` 0 and an intensity > 0 was *measured by matching between
+  runs: Sage found the peptide's MS1 signal at its aligned retention time in a run where it was
+  not identified by MS2* (`sage_lfq_check.MATCHED_BETWEEN_RUNS`, the one wording). The intensity
+  is that run's own signal; only the peptide's **identity** comes from other runs, and Sage gives
+  no per-run FDR for it. Nothing is "transferred", "filled in" or copied. A run where Sage found
+  no peak gets intensity **0**: *no MS1 signal*, a missing value (`build_maxlfq.R` drops it before
+  the rollup, so it is NA in the matrix and never present).
+  `sage_adapt.json` `row_evidence` counts the three kinds of rows (`sage_lfq_check.classify_rows`,
+  one definition): `identified_in_run` (identified there, signal > 0), `matched_between_runs`
+  (not identified there, signal > 0) and `no_ms1_signal` (0 or missing, identified or not; of
+  which `no_ms1_signal_identified_in_run`); the adapter prints them and the Methods sentence
+  says them. The DE tests matched values, so they count as **present** everywhere the DE reads
+  presence (one definition: a value in the matrix limma tests -- Detection_Matrix, Evidence, the
+  not-measured rule, the incomplete flag, the on/off list); no-signal rows never do. A protein
+  on the on/off list therefore never has a fold change for the same contrast. Which values were
+  matched is said beside it: each DE table's `matched_between_runs_only_in` names the compared
+  groups in which every value of the protein was measured by matching between runs (no peptide
+  of it identified by MS2 there), OnOff_Proteins.csv's `matched_between_runs_only` says the same
+  of the group the protein is present in, and the Methods count those protein × run values
+  (`de_provenance.json` `detection_matrix.matched_cells`). Until the 2.15.1 review the on/off
+  list counted identifications only while limma tested the matched values, and the two could
+  contradict.
+`build_maxlfq.R` rolls the peptides up per protein by Tukey's median polish (peptides × runs;
+the run effect plus the overall level; MSstats' summary, Choi et al. 2014), so one interfered
+peptide does not move the protein. `maxlfq_descriptor()` turns the declaration into the one
 description every output reads:
-- pipeline `peptide_max`, "Highest-peptide intensity + limma";
+- pipeline `peptide_medpolish`, "Peptide median polish + limma" (`peptide_max`, "Highest-peptide
+  intensity + limma", remains only for a peptide-level report without a peptide column);
 - a `rollup_method` naming that rollup, and an `identification_fdr` naming Sage's own FDR (the
   report's q-columns are 0.0 placeholders);
 - a `caveat` that `audit_results.py` turns into a `quantification` WARN (AUDIT.md, then the
@@ -176,9 +276,23 @@ description every output reads:
 
 methods.txt, de_provenance.json, the Methods (`make_methods.py`), the AI brief and
 reproducibility_log.R all quote these, so none of them says "DIA-NN" or "MaxLFQ" for a Sage
-DE. A real peptide → protein rollup for Sage is a backlog item (`docs/SKILL_OPEN_DEFECTS.md`
-in the DE-LIMP repo). DIA-NN's own report declares nothing and is described as DIA-NN
-PG.MaxLFQ, as before.
+DE. DIA-NN's own report declares nothing and is described as DIA-NN PG.MaxLFQ, as before; an
+undeclared report without DIA-NN's precursor columns is described as an undeclared report's
+`PG.MaxLFQ`, "NOT RECORDED [confirm]" (pipeline `undeclared_pg_maxlfq`), never as DIA-NN's.
+
+**Sage peptides through limpa (evaluated, not the default).** limpa's `dpcCN` / `dpcQuant` /
+`dpcDE` model missing values from a peptide-level matrix and would suit Sage's peptide × run
+table. Sage's values in runs without an MS2 identification are real MS1 measurements (matched
+between runs, as with DIA-NN's match-between-runs), so they are legitimate input to limpa like
+any other measured value. It is not switched on because three things are open:
+(1) **zeros must be missing** -- Sage writes 0 where it found no MS1 signal (13,072 of 229,985
+rows on the public ABRF 2020 set), and limpa's detection-probability model needs them as NA,
+never as a low intensity; (2) the **carried-over identities have no per-run FDR** -- a matched
+value's peptide was identified only in other runs, so in that run a wrong peak is possible and
+nothing controls it there (on the ABRF set most rows were not identified in their own run); and
+(3) **no known-answer comparison yet** -- PXD063416 (or another known-answer mix) searched with
+Sage, DE by limpa and by the median-polish route, false-discovery proportion and sensitivity
+per fold-change level. The input would also need its own between-run step.
 
 **The other adapters declare too, at level `protein`**:
 - `adapt_fragpipe_dda`: FragPipe/IonQuant MaxLFQ from `combined_protein.tsv`, with the
@@ -446,8 +560,8 @@ turned into depletion. So the DE's input is a decision, made once and recorded:
    `Precursor.Quantity` on every row) and then applies no between-run step; a normalised report is
    refused, never relabelled. A pull-down on maxlfq used to be normalised twice. **maxlfq
    `normalised`** says what its `PG.MaxLFQ` carries before any step of its own — DIA-NN's
-   normalisation (then no second step), or none for a `--no-norm` search (then the quantile
-   step) — from the search's provenance
+   normalisation (then no second step), or none for a `--no-norm` search (then the
+   `median_ratio` step; quantile up to 2.15.0) — from the search's provenance
    (`normalization_check.searched_no_norm`: the chain's `no_norm_report.parquet` name, else
    `search_provenance.json`), reading the data only when that records nothing, and NOT RECORDED
    when neither can tell (`de_provenance.json` `dia_nn_normalisation`).
@@ -551,7 +665,7 @@ protein and a contaminant entry can carry the contaminant's signal.
     `--cfg` stands. A relative path resolves where DIA-NN ran. A `--cfg` that can't be read
     never counts as "not set". Otherwise the text says `[not recorded -- confirm]`. FragPipe's
     DIA-NN step may not have been given the flag.
-  - Sage: the highest peptide is taken here from the rows kept.
+  - Sage: each protein is the median polish of the peptide rows kept.
   - FragPipe / AlphaDIA / Radiant: the engine's own quantities, used as reported. Whether
     keratin is under-quantified there is "not known" (JSON null), because the engine's protein
     inference (Philosopher's razor peptides) can move shared peptides.
@@ -605,11 +719,113 @@ are then tested too).
 ## Coverage filter (maxlfq path)
 
 `--coverage-min` (default 0.5) drops proteins quantified in fewer than that fraction
-of samples **before** limma. The MaxLFQ matrix keeps every protein seen in *any* run,
+of samples **before** limma -- unless they reach that fraction (at least 2 runs) of the runs of
+some one group (2.15.1, audit L2-1: a protein in every Treated run and no Control run was
+deleted before; now it reaches the DE table, with no fold change for that contrast, and the
+on/off list). `de_provenance.json` `coverage` records both minimums and how many proteins only
+the per-group rule kept. The MaxLFQ matrix keeps every protein seen in *any* run,
 so rows with 1-2 finite values otherwise reach `eBayes`, which then moderates variance
 against rows whose variance is barely estimable — destabilising the whole fit, not just
-those rows. Dropped proteins are an on/off observation, not a differential-abundance
+those rows. A protein kept only by the per-group rule stays in the same fit and its
+within-group variance feeds limma's variance prior, as any protein missing from a group always
+has: it is a real replicate variance, and with three or more groups the protein is tested
+between the groups that have it, which needs the shared prior. On PXD063416 these 28–88 rows
+moved adj.P by at most 0.0018 and changed no call (2.15.1, measured on HIVE 2026-11-17). Dropped proteins are an on/off observation, not a differential-abundance
 result, and the count lands in `filters_applied` so the Methods text says so.
+
+**The filter must not hide on/off proteins.** A protein seen in two runs of one group and none
+of the other is usually below the coverage minimum, so before 2.15.x it vanished without a
+trace; one that passed coverage came back with NA logFC and was never listed. Both are now
+listed in `OnOff_Proteins.csv`, counted on the matrix *before* this filter (next section).
+
+## On/off proteins (maxlfq path only)
+
+`OnOff_Proteins.csv` lists, per contrast, the proteins **quantified in at least `--onoff-min-n`
+(default 2) samples of one group and in none of the other group's samples**. Where the conditions
+carry a `Sample` column (several injections of one sample) the runs are collapsed to samples first:
+a sample counts as quantified if any of its runs has a value, `n_min` is in samples, and
+`detected_gN` / `total_gN` are samples. Without a `Sample` column each run is a sample and the
+record says so (`onoff.unit_source`, `collapsed_runs_to_samples`, `n_runs`, `n_samples`). They have no fold change
+and no p-value: this is a **detection pattern, not a measured ratio**, so they never go on the
+volcano, never count as tested or significant, and are reported in a separate short list (by gene)
+with the file's counts. Example: a client asks about ATF6, seen with the isotype control and not with
+mAb43 under cytokines; that protein is exactly this case.
+
+- **One definition.** `scripts/onoff.R` carries DE-LIMP's `compute_onoff_proteins()` (R/helpers.R,
+  commit b0683c04) verbatim; `tests/test_onoff_proteins.py` runs both on the same fixtures and fails
+  if they differ. Detection means a non-NA value in the MaxLFQ matrix, the same notion as
+  `Detection_Matrix.csv`.
+- **Columns:** `Protein.Group, Genes, Contrast, Direction, detected_g1, detected_g2, total_g1,
+  total_g2`. `Contrast` is `g1 - g2` in the order of the DE table (`B-A` is `B - A`); `Direction`
+  is `<group>_only`; `detected_gN` / `total_gN` are runs with a value / runs in group N. A row with
+  no gene keeps its `Protein.Group`. A run that finds none still writes the file (header only).
+  A report that says which values were identified in their run (Sage's `Identified.In.Run`)
+  adds `matched_between_runs_only`: TRUE when every value in the group the protein is present in
+  was measured by matching between runs (Sage found the MS1 signal at the aligned retention time;
+  no peptide of the protein was identified by MS2 there). A matched value counts as present --
+  the DE tests it -- so an on/off protein never has a fold change for that contrast. A run with
+  no MS1 signal (intensity 0) counts as absent.
+- **Which contrasts:** only a simple A-B (exactly +1 on one group, -1 on another). An average
+  (`C-(A+B)/2`), an interaction (`(B-A)-(D-C)`) or anything with a covariate term is skipped and
+  recorded in `de_provenance.json` `onoff.skipped` with the reason; the Methods, the analysis page and
+  `MANIFEST.txt` say so too. Check the contrasts you asked for against `onoff.contrasts`.
+- **Record:** `de_provenance.json` `onoff`: `rule` (the words every report reuses), `n_min`,
+  `contrasts.<name>` (`n_onoff`, `n_only_group_1/2`, `n_dropped_by_coverage_filter` = those limma never
+  saw), `skipped`, and `status` (`written`, `no_simple_contrasts` or `failed` + `reason`; a failure
+  warns on screen and is a `[SKIPPED]` line in `MANIFEST.txt`, never silent). `null` on `dpc`.
+- **Where it shows:** `methods.txt`, `make_methods.py` (one sentence), the analysis page (a callout), the
+  AI brief (a section naming the per-contrast counts and the "no fold change" rule), the report file
+  catalog and `MANIFEST.txt`, all read from that record.
+- **dpc is unchanged:** limpa infers missing values, so there is no such list, no file, `onoff` is null
+  and `--onoff-min-n` is refused.
+
+## Calls on incomplete data (every route)
+
+Every contrast's DE table (dpc, maxlfq, and the Sage / FragPipe / other engine routes, which run as
+maxlfq) carries three columns after `Evidence`:
+
+| column | meaning |
+|---|---|
+| `values_per_group` | `Ctrl 3/3; Treat 1/3`: runs measured / runs, for every group the contrast compares (the groups with a nonzero coefficient in limma's contrast matrix, so an average or an interaction lists all of its groups) |
+| `called_on_incomplete_data` | `TRUE`: significant (adj.P.Val below `--adjp`, the DE's own call rule) and some compared group has fewer than all its runs measured; `FALSE`: significant, every run measured; `NA`: not significant |
+| `incomplete_tier` | significant calls only: `complete`, `incomplete`, or `single_sample` (a group of several runs in which the protein was measured in one only) |
+
+**One definition of "measured".** `run_de.R` `detection_counts()` reads `det_n`, the same matrix as
+`Detection_Matrix.csv` and the `Detected_<group>` columns (dpc: at least one precursor observed, 0 =
+inferred by the model; maxlfq: a finite value). `incomplete_data.R` only turns those counts into the
+flag. Counts are runs, so technical replicates count each injection.
+
+**Why.** On the PXD063416 known-answer benchmark (human + yeast, four DIA windows, MaxLFQ + limma) calls
+from proteins measured in every run were wrong 0.25-0.7% of the time, calls with missing values in a
+compared group 4-10%, and calls from a protein seen in one run of a group 9-20%: flagged calls were about
+10x more likely to be wrong (Phinney lab filter-tuning prototype, 2026-11-13,
+`FILTER_TUNING_PROTOTYPE.md`). Treat a flagged hit as a lead to confirm. `de_provenance.json`
+`incomplete_data` holds the rule, the benchmark text and citation; `de_tables.<contrast>`
+`n_called_incomplete` / `n_called_single_sample` the counts. The Methods, the analysis page and the AI
+brief read all of it from there. DE-LIMP (the app) has no equivalent yet: a follow-up for the app.
+
+## QuantUMS cutoff trade-off (maxlfq path only)
+
+`QuantUMS_tradeoff.csv` re-fits the DE at five cutoffs and shows what each costs; it never applies one.
+Rows: `none`, `pgQ 0.5`, `pgQ 0.75`, `pgQ 0.75 + eQ 0.75`, `pgQ 0.85` (constants in
+`scripts/quantums_tradeoff.R`), plus an `as run (...)` row when the cutoffs you gave are none of these.
+Per contrast: `proteins_tested`, `significant`, `called_on_incomplete_data`, `called_single_sample`,
+`proteins_lost_vs_none` (tested with no filter, not tested here), `used_in_this_run`, `cutoff_source`,
+`note`.
+
+- **Same fit as the DE.** The report is read once; each cutoff's matrix is built in memory by
+  `build_maxlfq.R` `maxlfq_matrix()` (the run's own function), then fitted with this run's design,
+  contrasts, block, coverage filter and call rule. The row at the cutoffs you used equals the DE tables
+  (tests check this, including a blocked fit).
+- **The choice stays yours.** `--pgq-cutoff` / `--eq-cutoff` still default to off. The row used is
+  tagged `DEFAULT — not user-confirmed` when you set neither (`pgQ: user-chosen; eQ: DEFAULT — ...` when
+  one), and `pgQ 0.75 + eQ 0.75` is only marked `benchmark-recommended (PXD063416)`: close to the best
+  cutoff in every window of that benchmark and clearly better than none, and above pgQ 0.85 the true
+  calls fall apart (same citation as above).
+- **Skipped, with the reason recorded** (`de_provenance.json` `quantums_tradeoff.status`/`reason`, a
+  `[SKIPPED]` line in `MANIFEST.txt`): `--method dpc` (a pgQ cutoff deletes protein x run cells that limpa
+  then imputes back), a report without `Empirical.Quality` / `PG.MaxLFQ.Quality` (Sage, FragPipe, adapted
+  engines), `--no-quantums-tradeoff`; `failed` if the fit errors.
 
 Ported from DE-LIMP (`server_data.R`), whose default and rationale come from the
 UC Davis Bioinformatics Core. If it leaves <10 testable proteins the run stops rather
@@ -660,13 +876,15 @@ them before building on the size of the change. With no `Detection_Matrix.csv` (
 runs) the points carry no status, the subtitle says detection status was not recorded, and
 no status legend is drawn. Never describe those points as measured.
 
-## Citations (verified June 2026)
+## Citations
+Each entry was checked against the publisher or Crossref: in June 2026 unless the entry gives a
+later date.
 - **limpa / DPC:** Li M, Cobbold SA, Smyth GK (2025) bioRxiv 10.1101/2025.04.28.651125;
   Li M, Smyth GK (2023) Bioinformatics 39(5):btad200. (DE-LIMP's
   `dpc_pipeline_descriptor()` mis-cites this as "Law CW, Smyth GK" — fix upstream.)
 - **MaxLFQ path:** DIA-NN MaxLFQ (Demichev et al. 2020, Nat Methods 17:41) +
   limma (Ritchie et al. 2015, NAR 43:e47).
-- **Sage (highest-peptide path):** Lazear MR (2023) J Proteome Res 22(11):3652-3659,
+- **Sage (peptide median-polish path):** Lazear MR (2023) J Proteome Res 22(11):3652-3659,
   doi:10.1021/acs.jproteome.3c00486 (Crossref-verified 2026-09-29) + limma.
 - **QuantUMS quality filtering:** da Cruz Moschem J, Silva Campitelli de Barros BC,
   de Toledo Serrano SM, Chaves AFA (2025) *Decoding the Impact of Isolation Window
@@ -714,8 +932,9 @@ leave the flag off: exit 3 is the stop. Either way the answer is the person's (b
 
 `--quantities normalised` reads DIA-NN's normalised quantities (dpc: `Precursor.Normalised`;
 maxlfq: `PG.MaxLFQ` as DIA-NN normalised it, with no second step — `--between-run auto`, the
-default; a quantile step stays only for a `--no-norm` report or an engine's declared quantities,
-or as an explicit `--between-run quantile|median`); `raw` reads DIA-NN's non-normalised ones (dpc:
+default; quantities no engine normalised -- a `--no-norm` report, Sage's -- get `median_ratio`,
+and any step can be given as an explicit `--between-run`); `raw` reads DIA-NN's
+non-normalised ones (dpc:
 `Precursor.Quantity`, through limpa's own quantity-column argument; maxlfq: only a report
 searched with `--no-norm` — `diann_parallel.py --no-norm`, or `--no-norm` in a single-shot
 cfg — with no between-run step; a normalised report is refused, since its `PG.MaxLFQ` is
@@ -725,7 +944,14 @@ reads both quantities from this report, with no new search. (2) To keep MaxLFQ, 
 with `--no-norm` (`diann_parallel.py --no-norm` writes `no_norm_report.parquet`), run the raw
 check DE on that report, and pass it to the check as `--report-raw
 <no_norm_report.parquet>`. B1–B4 still read `--report`, and a raw decision holds the final DE
-to the `--report-raw` report. The check reads the normalisation factors (`Precursor.Normalised /
+to the `--report-raw` report. **An adapted report (2.15.1, audit L2-2):** a Sage report is not
+normalised by its engine, so its raw DE runs on the same report as it is (no between-run step);
+a FragPipe report whose IonQuant normalised (`ionquant.normalization=1`) is refused for raw --
+search again with `ionquant.normalization=0`, or decide normalised. On an adapted report B1–B3
+cannot be assessed (they need DIA-NN's precursor columns): the check then lists them as **not
+assessed**, never as agreement, and asks the user for the decision (`not_assessed` in the
+record; "NOT FULLY ASSESSED" in NORMALIZATION_CHECK.md). A version whose DE was not given is
+"not assessed" in the recommendation, never "0 anomalies". The check reads the normalisation factors (`Precursor.Normalised /
 Precursor.Quantity` = DIA-NN's `Normalisation.Factor`) against the groups, the fold changes
 before normalisation, identifications per group, `Normalisation.Instability`, and each
 contrast's volcano both ways (centre, up:down, % significant, bait rank, p-value shape); for
@@ -884,7 +1110,9 @@ Writes `DE_<method>_<contrast>.csv` + `Expression_Matrix.csv` +
 `methods.txt` + `sessionInfo.txt` + `de_provenance.json` (exact R package versions) +
 `QC_contaminant_share.csv` + `contaminants_removed.csv` + `Detection_Matrix.csv` (per protein ×
 sample: precursors observed, 0 = inferred by DPC / missing for MaxLFQ, per
-`de_provenance.json` `detection_matrix`) + **`reproducibility_log.R`** + (DPC runs)
+`de_provenance.json` `detection_matrix`) + (MaxLFQ runs) **`OnOff_Proteins.csv`** (proteins
+detected in one group of a contrast and absent from the other; see "On/off proteins") + (MaxLFQ runs)
+**`QuantUMS_tradeoff.csv`** (the DE at five QuantUMS cutoffs; see "QuantUMS cutoff trade-off") + **`reproducibility_log.R`** + (DPC runs)
 `DE-LIMP_session.rds`, which loads straight into the DE-LIMP app
 (https://delimp.stan-proteomics.org/) for interactive exploration.
 
@@ -905,7 +1133,9 @@ trades depth for quantitative reliability:
 |---|---|---|---|
 | `--eq-cutoff` | `Empirical.Quality` | 0 (off) | drop precursors whose empirical quality is below this |
 | `--pgq-cutoff` | `PG.MaxLFQ.Quality` | 0 (off) | drop protein groups whose MaxLFQ quality is below this |
-| `--coverage-min` | — | 0.5 | (`maxlfq` only) require a protein in ≥ this fraction of samples before testing |
+| `--coverage-min` | — | 0.5 | (`maxlfq` only) require a protein in ≥ this fraction of all samples, or of the runs of any one group (at least 2), before testing |
+| `--onoff-min-n` | — | 2 | (`maxlfq` only) samples (runs, without a `Sample` column) needed in the group that has it for a protein to be listed as on/off in `OnOff_Proteins.csv` (counted before the coverage filter) |
+| `--no-quantums-tradeoff` | — | off | (`maxlfq` only) do not write `QuantUMS_tradeoff.csv` |
 
 Both QuantUMS cutoffs are **off by default** — they discard real measurements, so
 they are the user's call, not a silent default. Offer them when quantitative
@@ -920,7 +1150,8 @@ back (`run_de.R` warns).
 
 `--coverage-min` is different: it is **on** at 0.5 because a protein seen in one or
 two samples is an on/off observation, and letting such rows into `eBayes` destabilises
-the variance moderation for *every* protein, not just those rows.
+the variance moderation for *every* protein, not just those rows. Those on/off
+observations are not lost: `OnOff_Proteins.csv` lists them.
 
 **After DE, log the contrasts** (`log_decision.py`) **and save the conversation**
 (`save_transcript.py <S>`; hive_remote: `--hive "$S"`). See SKILL.md and outputs.md, "Keeping the record of the analysis".
@@ -950,7 +1181,8 @@ result by "it's ≥2-fold". The moderated t-test tested H0: log2FC = 0, so that 
 claim the FDR covers; filtering the list on the observed fold change afterwards would
 report a stronger claim than the error rate supports, because an observed fold change is
 a point estimate with no uncertainty attached. (Testing a fold-change threshold properly
-needs `limma::treat()`'s interval null — McCarthy & Smyth 2009 — not a post-hoc cut.) You
+needs `limma::treat()`'s interval null — McCarthy & Smyth 2009 — not a post-hoc cut, and
+this skill does not run it: see "When the user asks for a fold-change cutoff" above.) You
 may report how many significant proteins also exceed the reference line, as a description
 of effect size.
 

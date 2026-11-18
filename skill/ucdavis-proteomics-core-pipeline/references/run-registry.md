@@ -121,7 +121,7 @@ This is the route when `session.py finalize` runs on a laptop.
 
 | Moment | Command | Called by |
 |---|---|---|
-| A search's final job ends, or any job fails (for an array, the first failing task) | `record_run.py search-done --out <search out dir> --status completed\|failed --exit-code N [--session <dir>]` | the job-end hook (`notify_slack.py`); the agent at step 7d |
+| A search's final job ends, or any job fails (for an array, the first failing task) | `record_run.py search-done --out <search out dir> --status completed\|failed --exit-code N [--session <dir>]` | the job-end hook (`notify_slack.py`); the agent at step 7b, when the chain dies before its last job |
 | `session.py finalize --zip` has run | `record_run.py analysis-done --session <dir> [--out <dir>] [--zip <zip>]` | the finalize hook; the agent at step 12 |
 
 Options on both commands:
@@ -407,8 +407,8 @@ the lock, append-only, with the header written only at creation.
 ## What is never copied
 
 - **Raw data, the FASTA itself, and per-run `.quant` files.** Single-shot searches keep `.quant`
-  in `quant/`; the 5-step chain keeps them in `quant_step2/`, `quant_step2_orig/` and
-  `quant_step4/`. The record lists where they are and how many there are.
+  in `quant/`; the 5-step chain keeps them in `quant_step2/` and `quant_step4/` (a search
+  from 2.15.0 or earlier also has `quant_step2_orig/`, an unused copy). The record lists where they are and how many there are.
 - **Anything over the per-file cap:** 20 MB (`--file-cap-mb`), or 5 MB for figures.
 - **Anything beyond the per-record budget:** 200 MB (`RECORD_RUN_COPY_BUDGET_MB`). These files
   are listed under "Not copied" with the reason.

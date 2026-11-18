@@ -61,9 +61,10 @@ import sys, os, json, glob, re, shlex, argparse, subprocess, shutil, stat, time,
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ONE definition of the q-value columns -- see diann_q_columns.py.
-from diann_q_columns import FDR_REQUIRED, PROTEIN_Q_PREFERENCE
+from diann_q_columns import FDR_REQUIRED, FDR_OPTIONAL, PROTEIN_Q_PREFERENCE, is_protein_level
 # the one reading of a protein identifier
-from protein_ids import fragpipe_group, group_accessions, group_entry_names
+from protein_ids import (fragpipe_group, group_accessions, group_entry_names,  # noqa: E402
+                         header_accession, header_entry_name)
 # No Bruker .d is searched before its analysis.tdf has been checked -- see bruker_tdf.py.
 from bruker_tdf import (STATUSES, INTEGRITY_RULES, fingerprint, integrity_warning,
                         tdf_integrity)
@@ -538,6 +539,62 @@ def sbatch_path():
 
 def slurm_available():
     return sbatch_path() is not None
+
+
+def cluster_is_hive(env=None):
+    """True on HIVE, by HIVE's own marker: HPC@UCD's cluster file names the cluster
+    (/opt/hpccf/etc/cluster_name.conf: "hive", "farm", "franklin"). Where there is no such file
+    the Core's group folder stands in. NOT "sbatch is on PATH": another SLURM cluster is not HIVE,
+    and was given HIVE's account and queue names. Same rule as hive_marker.sh (is_hive); the
+    environment names (UCD_HPC_CLUSTER_CONF, HIVE_GROUP_DIR) are the shell library's."""
+    env = os.environ if env is None else env
+    conf = env.get("UCD_HPC_CLUSTER_CONF") or "/opt/hpccf/etc/cluster_name.conf"
+    try:
+        with open(conf, errors="replace") as fh:
+            name = cluster_name_from_conf(fh.read())
+    except OSError:
+        name = ""
+    if name:
+        return "hive" in name
+    return os.path.isdir(env.get("HIVE_GROUP_DIR") or "/quobyte/proteomics-grp")
+
+
+_CLUSTER_NAME_LINE = re.compile(r"""^\s*(?:export\s+)?CLUSTER_NAME\s*=\s*["']?([^"'\s#]*)""")
+
+
+def cluster_name_from_conf(text):
+    """The cluster's name from HPC@UCD's cluster file, by hive_marker.sh's cluster_name rule (the
+    same rule, pinned equal by tests/test_hive_marker_agree_2151.py): a `CLUSTER_NAME=<name>` line
+    (as HPCCF's own ucd-hpc skill reads the file, by sourcing it) gives the name; with no such
+    line, the first line that is not blank and not a # comment, white space removed. Lower case;
+    "" when there is none."""
+    lines = text.splitlines()
+    for ln in lines:
+        m = _CLUSTER_NAME_LINE.match(ln)
+        if m:
+            return m.group(1).lower()
+    for ln in lines:
+        if ln.strip() and not ln.lstrip().startswith("#"):
+            return "".join(ln.split()).lower()
+    return ""
+
+
+def _queue_must_be_explicit(partition, account, assoc):
+    """On a SLURM cluster that is not HIVE, a queue nobody named is never filled in with HIVE's
+    names (genome-center-grp/high, publicgrp/low): the job would be rejected, or worse, run on
+    someone else's allocation. Exits with what to do. A single association is used as it is.
+    No SLURM here at all (sbatch_path() None, a test or a header written for later): unchanged."""
+    if cluster_is_hive() or not slurm_available() or (partition and account):
+        return None
+    distinct = sorted({(a, p or "", q or "") for a, p, q in assoc})
+    if len(distinct) == 1:
+        return distinct[0]
+    listed = ("; your SLURM associations (account|partition|qos): "
+              + ", ".join("|".join(x) for x in distinct)) if distinct else \
+             "; SLURM would not list your associations (sacctmgr)"
+    sys.exit("[slurm_queue] This is a SLURM cluster, but not HIVE, so HIVE's account and queue "
+             "names (genome-center-grp/high, publicgrp/low) do not apply and none is guessed" + listed +
+             ". Name your own: --partition <partition> --account <account> [--qos <qos>].")
 
 
 def cpu_hours_mod():
@@ -1412,6 +1469,9 @@ CITE = {
     "percolator3": "Percolator 3.0 (The et al. 2016, J Am Soc Mass Spectrom 27:1719-1727) "
                    "[10.1007/s13361-016-1460-7]",
 }
+#: An adapter that cannot tell whether its engine normalised across runs says so with this value
+#: of engine_normalised (build_maxlfq.R reads it as NA: not known), rather than leaving the key out.
+ENGINE_NORMALISED_UNKNOWN = "unknown"
 PLACEHOLDER_Q = ("The report's q-value columns are 0.0 placeholders, so the DE's q-value filter "
                  "keeps every row")
 # Set by main() before a search runs: the engine version it recorded (engine_version_record),
@@ -1497,9 +1557,14 @@ def fragpipe_quantity_declaration(out, quantity, directlfq=None):
         value = (f"{fp} protein intensity (not MaxLFQ), {mbr_txt} (combined_protein.tsv "
                  f"'<sample> Intensity')")
         cites = [CITE["msfragger"], CITE["ionquant"]]
+    # the same answer as a flag build_maxlfq.R's between-run rule reads (2.15.1, audit L2-3):
+    # "true" -> no second step; "false" -> a location-only one; left out when not recorded
+    eng_flag = ("true" if q == fq.QUANTITY_DIRECTLFQ or norm == "1" else
+                "false" if norm == "0" else None)
     return {
         "level": "protein",
         "engine_normalisation": eng_norm,
+        "engine_normalised": eng_flag,
         "label": label,
         "value": value,
         "identification": (f"FragPipe's own FDR: Philosopher filter {st['filter']} ("
@@ -1599,6 +1664,9 @@ def alphadia_quantity_declaration(out, source):
     return {
         "level": "protein",
         "engine_normalisation": eng_norm,
+        # build_maxlfq.R's between-run rule reads this (2.15.1, audit L2-3); None: not recorded
+        "engine_normalised": ("true" if m == "directlfq" and nd is True else
+                              "false" if m == "directlfq" and nd is False else None),
         "label": "AlphaDIA" + (f" {algo}" if m in ("directlfq", "quantselect") else ""),
         "value": f"{_vtag('AlphaDIA', ver)} protein-group LFQ intensity ({algo}; {source})",
         "identification": (f"AlphaDIA's own FDR: precursors and protein groups at {fdr} "
@@ -1612,23 +1680,45 @@ def alphadia_quantity_declaration(out, source):
 
 
 def radiant_quantity_declaration(out, intensity_col, q_col):
+    """What the adapted Radiant report holds. `q_col` is required: adapt_radiant() refuses an
+    output with no q-value column rather than write placeholders that pass every filter (audit
+    2026-11-17, lane 1 #7)."""
+    if not q_col:
+        raise ValueError("a Radiant report is never adapted without a q-value column")
     protein = intensity_col.lower().startswith("pg.")
-    ver = recorded_engine_version(out)
+    # the recorded version is the radiant-fulcrum container's tag, not Radiant's own: printed by
+    # the one rule (resolve_defaults.engine_version_text), as the Methods and the report do
+    from resolve_defaults import engine_version_text
+    ver = engine_version_text("radiant", recorded_engine_version(out), label="Radiant")
+    # 2.15.1 follow-up: whether Fulcrum normalised this column across runs is not documented
+    # anywhere the skill can read (its columns follow DIA-NN's names, "PG.Normalised" included,
+    # but no Fulcrum source or manual was checked). Declared "unknown" explicitly -- never left out:
+    # a peptide-level report that declares nothing is read as Sage's (not normalised) by
+    # build_maxlfq.R engine_normalised(). The between-run step is then median_ratio, tagged
+    # NOT RECORDED [confirm] in the Methods.
+    unknown = {"engine_normalised": ENGINE_NORMALISED_UNKNOWN,
+               "engine_normalisation": (
+                   f"whether Radiant Fulcrum normalised {intensity_col} across runs is NOT "
+                   f"RECORDED (the column name is not evidence of it, and Fulcrum's own "
+                   f"normalisation is not documented where the skill can read it) [confirm]")}
     ident = (f"Fulcrum's {q_col}, one q-value per protein and run, copied into each of the "
-             f"report's q-value columns and filtered at the DE's q-value cutoff" if q_col else
-             "none applied here: the Fulcrum output has no q-value column, so the report's "
-             "q-value columns are 0.0 placeholders and the DE's q-value filter keeps every row")
+             f"report's q-value columns and filtered at the DE's q-value cutoff"
+             if is_protein_level(q_col) else
+             f"Fulcrum's {q_col}, a PRECURSOR q-value: the best (lowest) one over each protein's "
+             f"precursors in a run, copied into each of the report's q-value columns and "
+             f"filtered at the DE's q-value cutoff. It is not a protein-level FDR: Fulcrum's "
+             f"output had no protein-group q-value column")
     if protein:
         return {"level": "protein", "label": "Radiant Fulcrum",
                 "value": f"{_vtag('Radiant', ver)} Fulcrum {intensity_col} per protein group",
-                "identification": ident, "q_columns": "real" if q_col else "placeholder",
-                "citation": CITE["radiant"]}
+                "identification": ident, "q_columns": "real",
+                "citation": CITE["radiant"], **unknown}
     # Fulcrum reported only a precursor-level quantity and the adapter kept the highest one per
     # protein and run: that is the peptide-level rollup, and it is declared as one
     return {"level": "peptide", "label": "Radiant Fulcrum",
             "value": f"{_vtag('Radiant', ver)} Fulcrum {intensity_col} precursor intensity",
-            "identification": ident, "q_columns": "real" if q_col else "placeholder",
-            "citation": CITE["radiant"]}
+            "identification": ident, "q_columns": "real",
+            "citation": CITE["radiant"], **unknown}
 
 
 # --------------------------------------------------------------- AlphaDIA -----
@@ -2035,27 +2125,45 @@ def adapt_radiant(out):
     # two-column chain -- Global.Q.Value / Lib.PG.Q.Value / PG.Q.Value are now
     # tried before falling all the way back to the run-level Q.Value.
     c_q = col(*PROTEIN_Q_PREFERENCE)
+    if not c_q:
+        # Up to 2.15.0 this wrote 0.0 into every q column, so every row passed the DE's filter
+        # (audit 2026-11-17, lane 1 #7). Refuse rather than invent a q-value.
+        sys.exit(f"Radiant output in {root} has no q-value column (looked for "
+                 f"{', '.join(PROTEIN_Q_PREFERENCE)}; saw {', '.join(t.column_names)}). Without "
+                 f"one no identification filter can be applied, so this output is not adapted "
+                 f"for the DE. Check the Fulcrum settings or version.")
 
     runs = [_radiant_run_name(r) for r in t.column(c_run).to_pylist()]
     # as DIA-NN writes Protein.Group (bare accessions; group_accessions leaves a bare one as it
     # is), so a FASTA-header-shaped id cannot hide a Cont_ entry from the contaminant filter
     pgs = [group_accessions(p) for p in t.column(c_pg).to_pylist()]
     vals = t.column(c_int).to_pylist()
-    qs = t.column(c_q).to_pylist() if c_q else [0.0] * len(pgs)
+    qs = t.column(c_q).to_pylist()
 
     # The combined report is PSM-level (many precursors per protein x run); collapse
-    # to one protein x run row, keeping the best q-value seen.
+    # to one protein x run row, keeping the best q-value seen. A row with no q-value is never
+    # given one (it used to be 0.0, which passes any cutoff): it does not count towards the
+    # best q, and a protein x run with no q-value at all is left out, and counted.
     best = {}
     for r, p, v, q in zip(runs, pgs, vals, qs):
         if v is None:
             continue
         k = (r, p)
         prev = best.get(k)
-        qq = float(q) if q is not None else 0.0
-        if prev is None or float(v) > prev[0]:
-            best[k] = (float(v), min(qq, prev[1]) if prev else qq)
-        else:
-            best[k] = (prev[0], min(prev[1], qq))
+        qq = float(q) if q is not None and q == q else None          # None / NaN: no q-value
+        qmin = (qq if prev is None or prev[1] is None else
+                prev[1] if qq is None else min(qq, prev[1]))
+        best[k] = (max(float(v), prev[0]) if prev else float(v), qmin)
+    no_q = [k for k, v in best.items() if v[1] is None]
+    for k in no_q:
+        del best[k]
+    if no_q:
+        sys.stderr.write(f"  [adapt] WARNING: {len(no_q)} protein x run row(s) of the Radiant "
+                         f"output have no {c_q} and were left out of the report (never given "
+                         f"a q-value)\n")
+    if not best:
+        sys.exit(f"Radiant output in {root}: no protein x run row has both a quantity and a "
+                 f"{c_q}; nothing to adapt.")
 
     runs2 = [k[0] for k in best]
     pgs2 = [k[1] for k in best]
@@ -3382,6 +3490,31 @@ def run_sage(cmd, params, files, fasta, out, threads, sbatch, queue=None, pwiz_s
 
 
 SAGE_ADAPT = "sage_adapt.json"
+# The protein groups Sage's parsimony left with no peptide (sage_protein_groups), one row each,
+# beside sage_adapt.json: a user looking for a protein that has no DE row finds where its peptides
+# went (2.15.1, HIVE F4). Written for every quantifying Sage search, header only when none.
+SAGE_NOT_QUANTIFIED_CSV = "sage_groups_not_quantified.csv"
+SAGE_NOT_QUANTIFIED_COLUMNS = ("protein_group", "peptides", "peptides_quantified_in", "why")
+
+
+def write_sage_not_quantified(out, grouping):
+    """sage_protein_groups' groups_not_quantified_list -> <out>/SAGE_NOT_QUANTIFIED_CSV. -> its
+    file name, or None (said on stderr, and recorded by the caller) when it cannot be written."""
+    import csv
+    path = os.path.join(out, SAGE_NOT_QUANTIFIED_CSV)
+    try:
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(SAGE_NOT_QUANTIFIED_COLUMNS)
+            for g in grouping.get("groups_not_quantified_list") or []:
+                w.writerow([g["group"], g["peptides"], ";".join(g["peptides_quantified_in"]),
+                            "every peptide is shared with a larger group and was quantified "
+                            "there (razor peptide); no DE row of its own"])
+    except OSError as e:
+        sys.stderr.write(f"[adapt] NOTE: could not write {SAGE_NOT_QUANTIFIED_CSV} in {out}: {e}; "
+                         f"the groups are still listed in {SAGE_ADAPT} protein_grouping\n")
+        return None
+    return SAGE_NOT_QUANTIFIED_CSV
 
 
 def sage_lfq_check_mod():
@@ -3406,18 +3539,37 @@ def sage_version(out):
     return rj or None
 
 
-def sage_quantity_declaration(out, qmax):
-    """What adapt_sage's rows are, in words the DE's methods can quote."""
+def sage_quantity_declaration(out, qmax, protein_q=None, matches_labelled=False):
+    """What adapt_sage's rows are, in words the DE's methods can quote. `protein_q`: the Sage
+    protein-level q the rows were filtered at (None: not applied); `matches_labelled`: the rows
+    carry Identified.In.Run. `matched_between_runs` carries sage_lfq_check's one definition to
+    run_de.R, which quotes it (no second wording in R)."""
+    slc = sage_lfq_check_mod()
     return {
         "level": "peptide",
         "label": "Sage",
+        # Sage's LFQ has no cross-run normalisation: build_maxlfq.R's between-run rule reads this
+        # (median-ratio step by default; the non-normalised route is these quantities as they are)
+        "engine_normalised": "false",
         "value": f"{_vtag('Sage', sage_version(out))} label-free MS1 peptide intensity "
                  f"(lfq.parquet)",
         "identification": (f"Sage's own FDR -- peptides passing its 1% peptide-level q-value "
                            f"enter its LFQ, and MS1 peaks are kept at a stored LFQ q_value <= "
                            f"{qmax:g} with its decoy peaks dropped (run_search.py adapt_sage; the "
                            f"stored q is shared with the precursor's decoy, so this keeps a "
-                           f"conservative subset of Sage's own 5% count). {PLACEHOLDER_Q}"),
+                           f"conservative subset of Sage's own 5% count). "
+                           + (f"Protein groups at Sage's picked-protein q-value <= {protein_q:g}; "
+                              if protein_q is not None else
+                              "No protein-level FDR filter was applied (no results.sage.parquet); ")
+                           + f"{SAGE_SHARED_RULE}. Sage's LFQ integrates each such peptide's "
+                           f"MS1 signal in every run at its aligned retention time (one MS1 "
+                           f"q-value per precursor over all runs, not per run); a value in a run "
+                           f"where MS2 did not identify the peptide is "
+                           f"{slc.MATCHED_BETWEEN_RUNS}"
+                           + ("; Identified.In.Run marks each value as identified in its run (1) "
+                              "or not (0)" if matches_labelled else "")
+                           + f"; a value with {slc.NO_MS1_SIGNAL}. {PLACEHOLDER_Q}"),
+        "matched_between_runs": slc.MATCHED_BETWEEN_RUNS,
         "q_columns": "placeholder",
         "citation": CITE["sage"],
     }
@@ -3449,6 +3601,159 @@ def _sage_refuse_empty(out, product, record, key, rec, reason):
                      + (f"; the earlier one was moved to {moved}" if moved else "")
                      + f" (recorded in {record}).\n")
     sys.exit(SAGE_EMPTY_EXIT)
+
+
+# Sage's protein-level FDR, applied to the quantified route from 2.15.1 (audit L2-4): Sage's
+# picked-protein q (fdr.rs picked_protein, one q per `proteins` membership string, written to
+# results.sage.parquet `protein_q`) at 1%, as the identifications-only route already reports it.
+SAGE_PROTEIN_Q = 0.01
+
+
+def sage_psm_evidence(res):
+    """results.sage.parquet -> ({proteins string: best protein_q over its target PSMs},
+    {(run, peptide): True} for a run's identifications -- SAGE_IDS_RULE, rank 1 at spectrum_q and
+    peptide_q <= SAGE_IDS_Q), or (None, None, why) when it cannot be read."""
+    try:
+        import pyarrow.parquet as pq
+        need = ("filename", "peptide", "proteins", "rank", "is_decoy", "spectrum_q", "peptide_q",
+                "protein_q")
+        have = pq.read_schema(res).names
+        miss = [c for c in need if c not in have]
+        if miss:
+            return None, None, f"{res} has no {', '.join(miss)} column"
+        t = pq.read_table(res, columns=list(need)).to_pydict()
+    except Exception as e:      # noqa: BLE001 -- returned as the reason, said in the record
+        return None, None, f"{res} unreadable ({type(e).__name__}: {e})"
+    best, ident = {}, set()
+    for i, prot in enumerate(t["proteins"]):
+        if t["is_decoy"][i]:
+            continue
+        q = t["protein_q"][i]
+        if q is not None and (prot not in best or q < best[prot]):
+            best[prot] = q
+        sq, pq_ = t["spectrum_q"][i], t["peptide_q"][i]
+        if (t["rank"][i] == 1 and sq is not None and sq <= SAGE_IDS_Q and pq_ is not None
+                and pq_ <= SAGE_IDS_Q):
+            ident.add((sage_run_name(t["filename"][i]), t["peptide"][i]))
+    return best, ident, None
+
+
+# Shared peptides (audit L2-4; 2.15.1 review finding 2): Sage's `proteins` is each peptide's own
+# list of database proteins, so one protein used to be tested as several rows (its unique peptides
+# as P1, each shared set as P1;P2, ...). The first 2.15.1 rule fixed that by DROPPING shared
+# peptides, and dropped two overlapping multi-protein lists both -- whole families with no
+# entry-unique peptide (histones H2A/H2B/H3, GSTM1/2/4, GH1/GH2/CSH1/2) then vanished from the DE
+# with only a count left behind. The rule is now protein-group parsimony, in ONE function
+# (sage_protein_groups) and ONE sentence (SAGE_SHARED_RULE), on the peptides that passed:
+#   1. proteins identified by exactly the same peptides are one group (indistinguishable);
+#   2. a group whose peptides are all in another group's is folded into it (a subset protein
+#      is listed in its superset's group; with several supersets, the one with the most
+#      peptides, then the first accession);
+#   3. a peptide still in several groups is a razor peptide: quantified only in the group with
+#      the most peptides (ties: more peptides of its own, then the first accession) -- MaxQuant's
+#      razor rule (Cox & Mann 2008);
+#   4. a group that step 3 leaves with no peptide is not quantified, and is LISTED (with the
+#      groups its peptides went to) in sage_adapt.json `protein_grouping`, never dropped silently.
+# A peptide whose list names a contaminant entry (Cont_ / contam_) keeps Sage's list: the DE's
+# contaminant step has its own rule for those (contaminants.R; keratin samples keep some).
+SAGE_SHARED_RULE = ("proteins were grouped by parsimony on the peptides that passed: proteins "
+                    "identified by the same peptides form one group, a protein whose peptides "
+                    "all belong to another group is listed in that group, and a peptide still "
+                    "shared between groups is quantified only in the group with the most "
+                    "peptides (a razor peptide; ties go to the group with more peptides of its "
+                    "own, then the first accession); a group left with no peptide is not "
+                    "quantified and is listed in sage_adapt.json, and peptides shared with a "
+                    "contaminant entry follow the contaminant rule")
+
+
+def sage_protein_groups(groups):
+    """{peptide: ';'-joined accession list} -> ({peptide: the protein group it is quantified
+    in}, record). The one implementation of SAGE_SHARED_RULE. Every peptide gets a group (none
+    is left out); `record` counts what the rule did and lists every group it left with no
+    peptide (`groups_not_quantified`) and every protein found only in contaminant-shared
+    peptides, so nothing identified disappears without a name."""
+    from fetch_fasta import is_contaminant_accession
+    sets = {pep: tuple(dict.fromkeys(a for a in g.split(";") if a))
+            for pep, g in groups.items() if g}
+    assigned = {}
+    pep_of = {}                                    # protein -> its non-contaminant peptides
+    cont_only = set()
+    n_cont = 0
+    for pep, accs in sets.items():
+        if any(is_contaminant_accession(a) for a in accs):
+            assigned[pep] = ";".join(accs)          # the contaminant rule's
+            n_cont += 1
+            cont_only.update(a for a in accs if not is_contaminant_accession(a))
+            continue
+        for a in accs:
+            pep_of.setdefault(a, set()).add(pep)
+    cont_only -= set(pep_of)
+    # 1. indistinguishable proteins: one class per identical peptide set
+    classes = {}
+    for a, ps in pep_of.items():
+        classes.setdefault(frozenset(ps), []).append(a)
+    cls = [(ps, sorted(accs)) for ps, accs in classes.items()]
+    cls.sort(key=lambda c: c[1][0])
+    by_pep = {}
+    for i, (ps, _) in enumerate(cls):
+        for p in ps:
+            by_pep.setdefault(p, set()).add(i)
+
+    def rank(i):                                  # most peptides first, then the first accession
+        return (-len(cls[i][0]), cls[i][1][0])
+    # 2. subset classes fold into a maximal superset
+    sup = {}
+    for i, (ps, _) in enumerate(cls):
+        cand = set.intersection(*(by_pep[p] for p in ps)) - {i}
+        cand = {j for j in cand if len(cls[j][0]) > len(ps)}
+        if cand:
+            sup[i] = cand
+    leading = [i for i in range(len(cls)) if i not in sup]
+    folded = {i: [] for i in leading}
+    for i, cand in sup.items():
+        tops = [j for j in cand if j not in sup] or sorted(cand, key=rank)[:1]
+        folded[min(tops, key=rank)].extend(cls[i][1])
+    name = {i: ";".join(cls[i][1] + sorted(folded[i])) for i in leading}
+    lead_set = set(leading)
+    # 3. razor peptides
+    lead_of = {p: sorted(by_pep[p] & lead_set) for p in by_pep}
+    own = {i: 0 for i in leading}
+    for p, gs in lead_of.items():
+        if len(gs) == 1:
+            own[gs[0]] += 1
+    got = {i: 0 for i in leading}
+    went = {}
+    n_razor = 0
+    for p, gs in lead_of.items():
+        if len(gs) > 1:
+            n_razor += 1
+            g = min(gs, key=lambda i: (-len(cls[i][0]), -own[i], cls[i][1][0]))
+            for o in gs:
+                if o != g:
+                    went.setdefault(o, set()).add(name[g])
+        else:
+            g = gs[0]
+        got[g] += 1
+        assigned[p] = name[g]
+    empty = sorted((i for i in leading if not got[i]), key=lambda i: cls[i][1][0])
+    record = {
+        "rule": SAGE_SHARED_RULE,
+        "peptides": len(sets),
+        "protein_groups_quantified": sum(1 for i in leading if got[i]),
+        "indistinguishable_groups": sum(1 for _, accs in cls if len(accs) > 1),
+        "subset_proteins_folded": sum(len(v) for v in folded.values()),
+        "razor_peptides": n_razor,
+        "contaminant_shared_peptides": n_cont,
+        "groups_not_quantified": len(empty),
+        # every group the razor step left with no peptide: named, with where its peptides went
+        "groups_not_quantified_list": [{"group": name[i], "peptides": len(cls[i][0]),
+                                        "peptides_quantified_in": sorted(went.get(i, ()))}
+                                       for i in empty],
+        # proteins whose every peptide also names a contaminant: in those rows (Sage's own
+        # list), so the contaminant step decides about them
+        "proteins_only_in_contaminant_shared_peptides": sorted(cont_only),
+    }
+    return assigned, record
 
 
 def adapt_sage(out):
@@ -3530,8 +3835,19 @@ def adapt_sage(out):
             sys.stderr.write(f"[adapt] NOTE: the target peptides at 1% could not be counted: "
                              f"{why_not}\n")
 
+    # Sage's protein FDR and each run's own identifications (2.15.1, audit L2-4 / L2-6): without
+    # results.sage.parquet neither can be applied, and the record says so
+    prot_q, ident, why_evidence = (sage_psm_evidence(res) if res else
+                                   (None, None, f"no results.sage.parquet under {out}"))
+    why_protein = why_evidence
+    if prot_q is not None and not (set(t.column(c_prot).to_pylist()) & prot_q.keys()):
+        # no lfq.parquet protein list carries a protein_q: a filter would drop every row
+        prot_q, why_protein = None, ("no lfq.parquet protein list matched a results.sage.parquet "
+                                     "protein_q, so no protein-level FDR filter could be applied")
     qmax = sage_lfq_check.LFQ_Q_MAX
     per_file, runs, prots, ints, names, feats = {}, [], [], [], [], []
+    raw_prot, peps_kept = [], []
+    n_protein_q_dropped = 0
     # the precursors kept, to set beside Sage's own logged count (one q per precursor, not per row)
     n_rows = t.num_rows
     peps = t.column(col("peptide")).to_pylist() if col("peptide") else [None] * n_rows
@@ -3543,6 +3859,7 @@ def adapt_sage(out):
             sage_lfq_check.q_passes(t.column(c_q)).to_pylist(), peps, chgs):
         rn = sage_run_name(r)
         n = per_file.setdefault(rn, {"rows": 0, "decoy_dropped": 0, "q_value_dropped": 0,
+                                     **({"protein_q_dropped": 0} if prot_q is not None else {}),
                                      "kept": 0})
         n["rows"] += 1
         if dec:
@@ -3550,6 +3867,11 @@ def adapt_sage(out):
             continue
         if not ok:
             n["q_value_dropped"] += 1
+            continue
+        if prot_q is not None and not (prot_q.get(p) is not None
+                                       and prot_q[p] <= SAGE_PROTEIN_Q):
+            n["protein_q_dropped"] += 1
+            n_protein_q_dropped += 1
             continue
         n["kept"] += 1
         kept_precursors.add((pep, chg))
@@ -3561,16 +3883,45 @@ def adapt_sage(out):
         # methods "Contaminants : none"). The entry names go where DIA-NN puts them.
         prots.append(group_accessions(p))
         names.append(group_entry_names(p))
+        raw_prot.append(p)
+        peps_kept.append(pep)
         # the item the DE counts (contaminants.R CONTAMINANT_FEATURE_COLUMNS): Sage's quantified
         # peptide -- its charge only when Sage kept charge states apart (combine_charge_states
         # false). Without it every peptide x run row was counted as a "precursor".
         feats.append(str(pep) if chg is None else f"{pep}/{chg}")
         ints.append(float(v) if v is not None else float("nan"))
 
+    # protein groups by parsimony (SAGE_SHARED_RULE): every peptide is quantified in exactly one
+    # group; a group left with no peptide is listed in the record, never dropped silently
+    pkey = [pp if pp is not None else f for pp, f in zip(peps_kept, feats)]
+    group_of, grouping = sage_protein_groups(dict(zip(pkey, prots)))
+    entry = {}                       # accession -> its entry name, from Sage's own lists
+    for raw in set(raw_prot):
+        for tok in str(raw).split(";"):
+            a, n_ = header_accession(tok), header_entry_name(tok)
+            if a and n_:
+                entry.setdefault(a, n_)
+    prots = [group_of.get(k_, g) for k_, g in zip(pkey, prots)]
+    names = [";".join(dict.fromkeys(entry[a] for a in g.split(";") if a in entry))
+             for g in prots]
+    # each row: was the peptide identified by MS2 in THIS run, or was its value measured by
+    # matching between runs (sage_lfq_check.MATCHED_BETWEEN_RUNS; audit L2-6)? Only when the
+    # identifications match lfq.parquet's peptides at all -- a format mismatch must not label
+    # every value "not identified in its run"
+    ident_col, ident_note = None, why_evidence
+    if ident is not None:
+        hits = [1 if (r, pp) in ident else 0 for r, pp in zip(runs, peps_kept)]
+        if ident and not any(hits):
+            ident_note = ("no lfq.parquet peptide matched a results.sage.parquet identification "
+                          "by name, so whether each value was identified in its run is NOT "
+                          "RECORDED")
+        else:
+            ident_col, ident_note = hits, None
     k = len(prots)
     out_tbl = pa.table({
         "Run": runs, "Protein.Group": prots, "Protein.Names": names, "Peptide.Id": feats,
         "PG.MaxLFQ": ints,
+        **({"Identified.In.Run": ident_col} if ident_col is not None else {}),
         # The rows are already Sage's valid MS1 quantities (decoys out, q_value <= LFQ_Q_MAX), so
         # the contract's q-columns are 0.0: the DE's own q filter must not apply a second,
         # different threshold to an MS1-integration q-value that none of them describes.
@@ -3578,24 +3929,47 @@ def adapt_sage(out):
     }, schema=pa.schema([("Run", pa.string()), ("Protein.Group", pa.string()),
                          ("Protein.Names", pa.string()), ("Peptide.Id", pa.string()),
                          ("PG.MaxLFQ", pa.float64())]
+                        + ([("Identified.In.Run", pa.int8())] if ident_col is not None else [])
                         + [(c, pa.float64()) for c in FDR_REQUIRED]))
     # PG.MaxLFQ here is the DE contract's column NAME, not what the numbers are: the report says
     # what they are, and build_maxlfq.R's methods text reads it from there.
-    declared = sage_quantity_declaration(out, qmax)
+    protein_rule = (f"protein groups at Sage's picked-protein q-value <= {SAGE_PROTEIN_Q:g}"
+                    if prot_q is not None else None)
+    declared = sage_quantity_declaration(out, qmax, protein_q=SAGE_PROTEIN_Q if prot_q is not None
+                                         else None, matches_labelled=ident_col is not None)
     out_tbl = declare_quantity(out_tbl, declared)
     report = os.path.join(out, "report.parquet")
-    totals = {key: sum(f[key] for f in per_file.values())
-              for key in ("rows", "decoy_dropped", "q_value_dropped", "kept")}
+    grouping["groups_not_quantified_file"] = (
+        write_sage_not_quantified(out, grouping)
+        or f"NOT WRITTEN: see the adapter's NOTE; the list is groups_not_quantified_list")
+    totals = {key: sum(f.get(key, 0) for f in per_file.values())
+              for key in ("rows", "decoy_dropped", "q_value_dropped")
+              + (("protein_q_dropped",) if prot_q is not None else ()) + ("kept",)}
     if not k:
         _sage_refuse_empty(out, "report.parquet", SAGE_ADAPT, "sage_adapt",
                            {"source": lfq, "report": None, "q_value_max": qmax,
                             "per_file": per_file, "totals": totals},
                            f"no Sage MS1 peak passed q_value <= {qmax:g} ({totals['rows']} "
                            f"lfq.parquet rows: {totals['decoy_dropped']} decoy, "
-                           f"{totals['q_value_dropped']} above it), so this search has nothing "
+                           f"{totals['q_value_dropped']} above it, {totals.get('protein_q_dropped', 0)} "
+                           f"in protein groups above Sage's protein q {SAGE_PROTEIN_Q:g}), so this "
+                           f"search has nothing "
                            f"to quantify -- see {sage_lfq_check.RECORD}")
     pq.write_table(out_tbl, report)
     logp = sage_lfq_check.find_log(out)
+    # the three-way count (sage_lfq_check.classify_rows, ONE definition): identified in the run;
+    # measured by matching between runs (MS1 signal > 0, no MS2 identification there); no MS1
+    # signal (0 / missing -- a missing value, which build_maxlfq.R drops, never present)
+    if ident_col is not None:
+        row_evidence = sage_lfq_check.classify_rows(ident_col, ints)
+    else:
+        row_evidence = {"rows": k, "no_ms1_signal": sum(
+            1 for v in ints if not sage_lfq_check.has_ms1_signal(v)),
+            "identified_in_run": None, "matched_between_runs": None,
+            "not_recorded": f"identified vs measured by matching between runs: {ident_note}"}
+    row_evidence["identified_in_run_rule"] = SAGE_IDS_RULE + " in that run"
+    row_evidence["matched_between_runs_rule"] = sage_lfq_check.MATCHED_BETWEEN_RUNS
+    row_evidence["no_ms1_signal_rule"] = sage_lfq_check.NO_MS1_SIGNAL
     rec = {"source": lfq, "report": report,
            "kept_rule": (f"is_decoy false and stored q_value <= {qmax:g} (the stored q is shared "
                          f"with the precursor's decoy, so this is a conservative subset of "
@@ -3618,7 +3992,25 @@ def adapt_sage(out):
            "sage_log": logp,
            "row_unit": "one row per (peptide, file); protein rollup downstream",
            # the rule above in a Methods section's words (make_methods.py quotes it)
-           "methods_sentence": sage_lfq_check.methods_sentence(qmax),
+           # 2.15.1 (audit L2-4 / L2-6): the protein filter, the shared-peptide rule and whether
+           # each value says if MS2 identified it in its run; the three-way count below
+           "protein_q_max": SAGE_PROTEIN_Q if prot_q is not None else None,
+           "protein_rule": protein_rule or f"NOT APPLIED: {why_protein}",
+           "protein_q_dropped_rows": n_protein_q_dropped,
+           "shared_peptide_rule": SAGE_SHARED_RULE,
+           # what the rule did: counts, and every group it left unquantified, by name
+           "protein_grouping": grouping,
+           "identified_in_run": ("Identified.In.Run column: 1 = " + SAGE_IDS_RULE
+                                 + " in that run; 0 = not identified by MS2 in that run: with "
+                                 "an intensity > 0 the value was "
+                                 + sage_lfq_check.MATCHED_BETWEEN_RUNS + "; with 0 or none, "
+                                 + sage_lfq_check.NO_MS1_SIGNAL
+                                 if ident_col is not None else f"NOT RECORDED: {ident_note}"),
+           "row_evidence": row_evidence,
+           "methods_sentence": sage_lfq_check.methods_sentence(
+               qmax, protein_q=SAGE_PROTEIN_Q if prot_q is not None else None,
+               shared_rule=SAGE_SHARED_RULE, matches_labelled=ident_col is not None,
+               row_evidence=row_evidence),
            "declared_quantity": declared,
            "per_file": per_file, "totals": totals}
     try:
@@ -3641,6 +4033,25 @@ def adapt_sage(out):
           + (f", for {cov['target_peptides_identified_1pct']} target peptides identified at 1% "
              f"FDR ({cov['fraction'] * 100:.1f}%)" if cov else "")
           + f"; per file in {SAGE_ADAPT})")
+    if ident_col is not None:
+        print(f"  [adapt] of the {row_evidence['rows']} peptide x run values: "
+              f"{row_evidence['identified_in_run']} identified by MS2 in their run, "
+              f"{row_evidence['matched_between_runs']} {sage_lfq_check.MATCHED_LABEL} (MS1 "
+              f"signal at the aligned retention time, no MS2 identification in that run), "
+              f"{row_evidence['no_ms1_signal']} with {sage_lfq_check.NO_SIGNAL_LABEL} "
+              f"(missing values)")
+    print(f"  [adapt] protein groups (parsimony): {grouping['protein_groups_quantified']} "
+          f"quantified; {grouping['indistinguishable_groups']} of indistinguishable proteins, "
+          f"{grouping['subset_proteins_folded']} subset proteins listed in their superset's "
+          f"group, {grouping['razor_peptides']} razor peptides")
+    if grouping["groups_not_quantified"]:
+        ex = [g["group"] for g in grouping["groups_not_quantified_list"][:5]]
+        print(f"  [adapt] NOTE: {grouping['groups_not_quantified']} protein group(s) kept no "
+              f"peptide of their own (all went to a larger group as razor peptides), so they "
+              f"have no row in the DE: {', '.join(ex)}"
+              + (" ..." if grouping["groups_not_quantified"] > len(ex) else "")
+              + f" -- every one is listed in {SAGE_NOT_QUANTIFIED_CSV} and {SAGE_ADAPT} "
+              f"protein_grouping")
     return report
 
 
@@ -5170,23 +5581,32 @@ def adapt_fragpipe_dia(out):
     c_run, c_pg, c_q = col("Run"), col("Protein.Group"), col("PG.MaxLFQ", "PG.Quantity")
     if not all([c_run, c_pg, c_q]):
         sys.exit(f"{tsv} lacks Run / Protein.Group / PG.MaxLFQ — cannot build the DE contract.")
-    # Carry the q-value columns through when present; the DE step filters on them.
-    # Carry each contract q-column through when the source has it, else 0.0.
-    # Driven off FDR_REQUIRED so adding a column to the contract cannot leave
-    # this adapter silently emitting one fewer.
-    src_q = {c: col(c) for c in FDR_REQUIRED}
+    # Carry every q-value column of the filter set through: the required ones (refused when
+    # absent -- a missing column used to be written as 0.0, which passes any cutoff) and the
+    # optional ones the report has (Global.Q.Value, Global.PG.Q.Value, PG.Q.Value: DIA-NN's
+    # README recommends filtering on the Global pair, and they used to be dropped here, so the DE
+    # filtered on run-level precursor q plus the library columns only; audit 2026-11-17, lane 1
+    # #5). Driven off the shared definition, so adding a column to it cannot leave this adapter
+    # emitting one fewer. An empty cell stays empty (NaN), exactly as in a DIA-NN parquet.
+    src_q = {c: col(c) for c in FDR_REQUIRED + FDR_OPTIONAL}
+    missing = [c for c in FDR_REQUIRED if not src_q[c]]
+    if missing:
+        sys.exit(f"{tsv} lacks the q-value column(s) {', '.join(missing)}, which the DE filters "
+                 f"on. Not adapted: writing them as 0.0 would let every row pass the filter. Is "
+                 f"this DIA-NN's main report?")
+    carried = [c for c in FDR_REQUIRED + FDR_OPTIONAL if src_q[c]]
     n = len(rows)
     tbl = pa.table({
         "Run": [back.get(r[c_run], r[c_run]) for r in rows],
         "Protein.Group": [r[c_pg] for r in rows],
         "PG.MaxLFQ": [num(r[c_q]) for r in rows],
-        **{c: [num(r[src_q[c]]) if src_q[c] else 0.0 for r in rows]
-           for c in FDR_REQUIRED},
+        **{c: [num(r[src_q[c]]) for r in rows] for c in carried},
     })
     report = os.path.join(out, "report.parquet")
     pq.write_table(tbl, report)
     fragpipe_dia_runs_check(out, report)
-    print(f"  [adapt] FragPipe DIA: {os.path.basename(tsv)} -> {report}  ({n} rows)")
+    print(f"  [adapt] FragPipe DIA: {os.path.basename(tsv)} -> {report}  ({n} rows; q-value "
+          f"columns carried: {', '.join(carried)})")
     return report
 
 
@@ -5671,6 +6091,10 @@ def slurm_queue(partition=None, account=None, qos=None,
     # then use the cluster default partition, which on HIVE is `high` — precisely the
     # queue a non-facility account cannot use.
     assoc = _associations()
+    only = _queue_must_be_explicit(partition, account, assoc)
+    if only is not None:                       # a non-HIVE cluster with exactly one association
+        a, p, q = only
+        return partition or (p or None), account or a, qos or (q or None)
 
     # An empty partition or QOS field in an association means "no restriction", which is a
     # fine DEFAULT but not a licence to confirm a value the user typed: a blank QOS field used

@@ -449,6 +449,60 @@ def _core_work(p):
     return os.path.lexists(p["submission_record"])
 
 
+def core_acquisition(session):
+    """Did the UC Davis Proteomics Core acquire this session's data, by the session's own records?
+    THE test for printing the Core's instrument acknowledgment (make_methods.py; 2.15.1 review
+    finding 4). A reason (str) when yes, None when not recorded -- fail closed:
+      * core_run(session): a CoreOmics submission attached (or announced with its record
+        missing), or Core staff's client-work mark;
+      * session.json "analysis_for" (session.py init, asked of Core staff only, SKILL.md 0a):
+        {"submissions": [...]} -- the analysis answers a CoreOmics submission whose record is
+        not attached yet -- or {"internal": "<title>"} -- the Core's own work.
+    A damaged or missing session.json, or one that says none of these, is None: data analysed
+    outside the Core never get the Core's sentence. A standalone Methods (no session) asks the
+    user and passes make_methods.py --acquired-at-core (SKILL.md 9d)."""
+    if not session:
+        return None
+    c = core_run(session)
+    if c:
+        return (f"CoreOmics submission {c['prot']}" if c.get("prot")
+                else "Core staff's client-work mark (session.py core-client)")
+    p = paths_for(os.path.expanduser(session))
+    try:
+        sj = _read_json(p["session_json"])
+    except RecordError:
+        return None
+    af = sj.get("analysis_for") if isinstance(sj, dict) else None
+    if not isinstance(af, dict):
+        return None
+    subs = [str(x) for x in (af.get("submissions") or []) if str(x).strip()]
+    if subs:
+        return (f"session.json analysis_for: submission {', '.join(subs)} (session.py init "
+                f"--submission; its CoreOmics record is not attached)")
+    title = af.get("internal")
+    if isinstance(title, str) and title.strip():
+        return f"session.json analysis_for: the Core's internal work ({title.strip()})"
+    return None
+
+
+def core_work(session):
+    """Is this session Core work, by its own records or by core_run? The test that keeps a
+    decision staff-only (normalization_check.own_analysis_signer): yes for a session init marked
+    for Core staff (--submission / --internal), with a CoreOmics block, a Core client mark (backed
+    or not) or an attached submission record -- and, failing closed, for a session.json that
+    cannot be read OR does not exist (2.15.1 review minor 8: `--session <an empty folder>` opened
+    the analyst's own signer). No only for a session whose session.json exists, reads, and says
+    nothing of the Core."""
+    p = paths_for(os.path.expanduser(session))
+    try:
+        sj = _read_json(p["session_json"])
+    except RecordError:
+        return True                                  # damaged: never loosen a staff-only rule
+    if sj is None or not isinstance(sj, dict):
+        return True                                  # missing / not an object: the same
+    return bool(_core_work(p) or core_run(session))
+
+
 def _mark_unbacked(sj, p):
     """A core_client block in session.json with no matching staff record (core_client_mark
     says no): typed by hand, or a laptop copy pulled without logs/core_client.staff.json."""

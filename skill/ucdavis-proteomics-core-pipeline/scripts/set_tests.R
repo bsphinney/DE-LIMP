@@ -6,7 +6,8 @@
 #   camera  COMPETITIVE: are the set's proteins more changed than the other proteins?
 #           Wu D, Smyth GK (2012) Nucleic Acids Res 40(17):e133.
 #   fry     SELF-CONTAINED: are the set's proteins changed at all? (roast with
-#           nrot = Inf; Giner G, Smyth GK (2016) F1000Research 5:2605.)
+#           nrot = Inf; Giner G, Smyth GK (2016) F1000Research 5:2605 -- conference slides,
+#           not peer reviewed, doi:10.7490/f1000research.1113351.1; the method is limma's fry.)
 # They answer different questions and do disagree: in the Dog CSF session (2026-09-21) a CNS
 # set was camera-significant while fry gave p = 0.53 -- the set moved relative to the rest,
 # the rest moved too. A reader needs both to know which is the case.

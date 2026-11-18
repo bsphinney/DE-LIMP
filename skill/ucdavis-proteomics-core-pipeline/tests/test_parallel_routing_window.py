@@ -591,6 +591,7 @@ class SbatchCannotResubmitAStaleJobTests(unittest.TestCase):
             before(d)
         env = {k: v for k, v in os.environ.items() if k != "SLURM_JOB_ID"}
         env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        env["HIVE_GROUP_DIR"] = d   # a fake sbatch stands for HIVE (2.15.1: cluster_is_hive)
         p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
                             "--tools", tools, "--bundle", bundle, "--params", cfg,
                             "--fasta", fasta, "--out", os.path.join(d, "out"),
@@ -718,7 +719,10 @@ class ProvenanceSaysWhatWasPassedTests(unittest.TestCase):
                 self.assertIsNone(rec["value"])
         with tempfile.TemporaryDirectory() as d:
             rec = run_search.scan_window_record("diann", _cfg(d, PINNED_MA), None)
-            self.assertIn("unverified", rec["source"])
+            # 2.15.1 (audit 2026-11-17 L1-9): no window at all says what DIA-NN's README says it
+            # does in one multi-file run -- tunes on the first run, so file order matters
+            self.assertIn("first run in the list", rec["source"])
+            self.assertIn("file order", rec["source"])
             rec = run_search.scan_window_record("diann", _cfg(d, PINNED_MA + "--window 7\n", "p7.cfg"), None)
             self.assertEqual((rec["value"], rec["passed"]), (7, ["--window 7"]))
 

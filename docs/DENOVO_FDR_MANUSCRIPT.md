@@ -156,11 +156,19 @@ Implemented in DE-LIMP (open source): `scripts/denovo_decoy_gen.py`,
 - **Figure 3.** FDR-vs-yield by scoring scheme, ocelot and HeLa (`composite_fdr_figure.png`).
 
 ## References
-1. Tran NH, et al. NovoBoard: a comprehensive framework for evaluating de novo peptide sequencing.
-   *Mol Cell Proteomics* 2024. doi:10.1016/j.mcpro.2024.100849.
-2. Fenyö D, Phinney BS, Beavis RC. [ρ-diagrams and ρ-scores]. *J Proteome Res* 2007.
+1. Tran NH, Qiao R, Mao Z, Pan S, Zhang Q, Li W, Xin L, Li M, Shan B. NovoBoard: A Comprehensive
+   Framework for Evaluating the False Discovery Rate and Accuracy of De Novo Peptide Sequencing.
+   *Mol Cell Proteomics* 2024;23(11):100849. doi:10.1016/j.mcpro.2024.100849.
+2. Fenyö D, Phinney BS, Beavis RC. Determining the Overall Merit of Protein Identification Data
+   Sets: rho-Diagrams and rho-Scores. *J Proteome Res* 2007;6(5):1997-2004.
    doi:10.1021/pr070025y.
-3. Yilmaz M, et al. Casanovo: de novo peptide sequencing with a transformer model.
-4. Buchfink B, et al. DIAMOND: fast and sensitive protein alignment. *Nat Methods*.
-5. Lazear MR. Sage: an open-source tool for fast proteomics searching. *J Proteome Res* 2023.
-6. Han Y, Ma B, Zhang K. SPIDER: de novo sequencing with homology search (PEAKS). 2005.
+3. Yilmaz M, Fondrie WE, Bittremieux W, Melendez CF, Nelson R, Ananth V, Oh S, Noble WS.
+   Sequence-to-sequence translation from mass spectra to peptides with a transformer model
+   (Casanovo). *Nat Commun* 2024;15:6427. doi:10.1038/s41467-024-49731-x.
+4. Buchfink B, Xie C, Huson DH. Fast and sensitive protein alignment using DIAMOND.
+   *Nat Methods* 2015;12:59-60. doi:10.1038/nmeth.3176.
+5. Lazear MR. Sage: An Open-Source Tool for Fast Proteomics Searching and Quantification at
+   Scale. *J Proteome Res* 2023;22(12):3652-3659. doi:10.1021/acs.jproteome.3c00486.
+6. Han Y, Ma B, Zhang K. SPIDER: software for protein identification from sequence tags with de
+   novo sequencing error. *J Bioinform Comput Biol* 2005;3(3):697-716.
+   doi:10.1142/s0219720005001247.

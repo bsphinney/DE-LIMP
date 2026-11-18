@@ -1,5 +1,5 @@
 {
-  "description": "Save the analysis conversation into its session before a compaction and when the session ends (scripts/transcript_hook.py). A no-op unless session.py / save_transcript.py recorded this Claude Code session for an analysis; it never blocks and never fails the session. Stop: reminds the agent once, with the finish checklist, when an analysis it ran has finish items missing (scripts/finish_stop_hook.py); silent otherwise, never fails the turn.",
+  "description": "Save the analysis conversation into its session before a compaction and when the session ends (scripts/transcript_hook.py). A no-op unless session.py / save_transcript.py recorded this Claude Code session for an analysis; it never blocks and never fails the session. Stop: reminds the agent once, with the finish checklist, when an analysis it ran on THIS computer has finish items missing (scripts/finish_stop_hook.py); silent otherwise, never fails the turn. It does NOT check a session whose folder is on HIVE (every CoreOmics submission): HIVE cannot be asked from a hook without risking a hang, so for those the agent must run session.py status on HIVE itself before saying the analysis is finished.",
   "hooks": {
     "PreCompact": [
       {

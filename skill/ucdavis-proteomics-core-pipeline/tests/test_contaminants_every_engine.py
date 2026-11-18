@@ -212,7 +212,7 @@ class EveryEngineFiltersAndSaysWhatItDid(unittest.TestCase):
 
     def test_the_keratin_lines_say_what_each_engine_did(self):
         for engine, label, says in (
-                ("sage", "Sage", "Each protein's value is taken here from the peptide rows the "
+                ("sage", "Sage", "Each protein's value is computed here from the peptide rows the "
                                  "filter kept, so those keratin peptides count in it; Sage was "
                                  "given no contaminant exclusion."),
                 ("fragpipe", "FragPipe IonQuant MaxLFQ",

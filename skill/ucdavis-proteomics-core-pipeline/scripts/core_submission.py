@@ -4503,7 +4503,9 @@ def tables_description(delivered: set) -> str:
     not there sends the collaborator looking for it."""
     parts = []
     if any(x.startswith("tables/DE_") for x in delivered):
-        parts.append("one DE_*.csv per comparison")
+        # 2.15.1 follow-up (audit L1-13): which table is the result, said where the files are
+        parts.append("one DE_*.csv per comparison: the results of record (the protein values "
+                     "and statistics the report uses)")
     for name, text in (("tables/Expression_Matrix.csv", "the expression matrix"),
                        ("tables/methods.txt", "methods.txt"),
                        ("tables/reproducibility_log.R", "reproducibility_log.R (the analysis as R code)")):
@@ -4789,6 +4791,9 @@ def build_readme(summary: dict, delivered: set, raw_names: list, mode: str = "an
             ("reproducibility/", "the pinned record of the run: software versions, parameters, checksums, "
                                  "and reproduce.sh"),
             (sd, "the search engine's own output (report.parquet and the matrices delivered)"
+                 + ("; its protein matrix (such as DIA-NN's pg_matrix) is the engine's own "
+                    "summary, kept for reference -- the results of record are the DE tables in "
+                    "`tables/`" if any(x.startswith("tables/DE_") for x in delivered) else "")
                  if sd_quantified else
                  "the search engine's own output: identifications.tsv (the identifications, per "
                  "run), what was kept (*_identifications.json) and search_provenance.json; "

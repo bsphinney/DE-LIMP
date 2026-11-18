@@ -8,13 +8,13 @@ genuine manual fallback.
 **Contents** (section: line)
 - 20: Installing the SKILL itself — marketplace only
 - 92: What `setup.sh` installs automatically (no admin / no sudo)
-- 177: The search engines
-- 190: The ONE manual step: Docker on macOS (only for DIA-NN / DIA data)
-- 204: macOS + Sage + Bruker/Thermo
-- 216: Windows
-- 247: Assume nothing about the user's computer (golden rule 7)
-- 268: When something is missing (a tool, an unrecognised instrument)
-- 283: Step 0: the one-time setup, and what `setup.json` says
+- 192: The search engines
+- 205: The ONE manual step: Docker on macOS (only for DIA-NN / DIA data)
+- 219: macOS + Sage + Bruker/Thermo
+- 231: Windows
+- 262: Assume nothing about the user's computer (golden rule 7)
+- 283: When something is missing (a tool, an unrecognised instrument)
+- 301: Step 0: the one-time setup, and what `setup.json` says
 <!-- /contents -->
 
 ## Installing the SKILL itself — marketplace only
@@ -100,8 +100,8 @@ a `~/.condarc` listing `defaults` cannot pull in its R ≤ 4.3 builds — contai
 |---|---|
 | `python=3.11` + `pyarrow` + `pyyaml` | the skill's Python scripts + parquet adapters |
 | `r-base` (≥4.5) | the DE step |
-| `bioconductor-limpa` (1.2.5, noarch) | the DPC-Quant DE pipeline — bioconda's only build, a floor: step 2a then installs **limpa ≥ 1.4.0** from the Bioconductor 3.23 source repository |
-| `bioconductor-limma` (3.66) + `r-statmod` + `r-data.table` | both DE pipelines (limpa's and limma's dependencies) |
+| *(not from conda)* limpa **1.4.0** | the DPC-Quant DE pipeline. Step 2a installs it from the Bioconductor 3.23 **source** repository (pure R; it needs only limma, data.table and statmod, all in this list). bioconda's only build, 1.2.5, is **not** in the list: it requires limma < 3.67, so it cannot be solved with the limma 3.68.5 pin |
+| `bioconductor-limma` (3.68.5) + `r-statmod` (1.5.1) + `r-data.table` | both DE pipelines (limpa's and limma's dependencies) |
 | `r-nanoparquet` | reading a DIA-NN `report.parquet` |
 | `r-arrow`, `r-dplyr`, `r-tidyr` | reading parquet + the MaxLFQ matrix builder |
 | `sage-proteomics` | the DDA search engine |
@@ -112,7 +112,8 @@ a `~/.condarc` listing `defaults` cannot pull in its R ≤ 4.3 builds — contai
 
 `setup.sh` also runs **`ensure_dotnet8.sh`** (Linux and macOS; not with `--check`): one .NET 8
 root with `Microsoft.NETCore.App` ≥ 8.0.17 + `Microsoft.AspNetCore.App` in
-`~/.proteomics-pipeline/dotnet8`, which DIA-NN's `.raw` reader, a framework-dependent
+`$PP_HOME/dotnet8` (default `~/.proteomics-pipeline/dotnet8`; a good root already at that old
+default is reused), which DIA-NN's `.raw` reader, a framework-dependent
 ThermoRawFileParser and the resolution reader all use. It reuses a good root at once. A failure
 (it needs internet the first time) is a note, not a stop; `setup.json`'s `dotnet8`
 (`root`, `note`) says what happened.
@@ -141,6 +142,20 @@ fully uninstalls it.
 
 `setup.sh --check` reports readiness without installing anything.
 
+**Pinned versions and checked downloads (2.15.1).** A fresh install gets fixed versions, not
+whatever is newest that day: python 3.11, limma 3.68.5, statmod 1.5.1, arrow 24.0.0 (R and
+Python), Sage 0.14.7 and limpa 1.4.0 (`PIN_*` at the top of `setup.sh`, the one place they are
+set), so two installs a month apart give the same DE numbers. An environment that already works
+with a newer limpa is left alone, and `setup.json`'s notes say it differs. Every file the skill
+downloads and then runs (micromamba 2.10.0-0, Microsoft's .NET installer script, FragPipe 24.0,
+DIA-NN 2.7.0 / 2.6.1) is checked against the sha256 the vendor published
+(`scripts/verify_download.sh`, values in `scripts/pinned_checksums.txt`). A file that does not
+match is deleted and not used: the output says `ERROR: <name> does not match the published
+checksum, so it was NOT used`, with the expected and actual sha256, and setup stops for that
+tool. That usually means a broken or intercepted download: try again on another network, and if
+it repeats, report it (`report_issue.sh`) rather than install the file by hand. Sage publishes no
+checksum, so it is downloaded and the notes say `NOT verified`.
+
 **Thermo `.raw` readiness** — `setup.json` has `ready_for.thermo_raw` and a
 `thermo_raw_reader` object (`command`, `source`, `version`, `dotnet_needs`, `dotnet_root`,
 `note`). It asks `detect_acquisition.py --check-reader` — the same parser search and .NET
@@ -164,7 +179,7 @@ shared parser, and the release's `-net8` zip run as `dotnet ThermoRawFileParser.
 ("You must install .NET") or 150 ("You must install or update .NET"). `detect_acquisition.py`
 checks this before reading anything, and picks the first place that has both —
 `$DOTNET_ROOT`, `ensure_dotnet8.sh`'s install (`$PROTEOMICS_DOTNET_DIR`, default
-`~/.proteomics-pipeline/dotnet8`), `$DOTNET_CORE_SDK_ROOT` (HIVE: `module load
+`$PROTEOMICS_PIPELINE_HOME/dotnet8`, else `~/.proteomics-pipeline/dotnet8`), `$DOTNET_CORE_SDK_ROOT` (HIVE: `module load
 dotnet-core-sdk/8.0.4`), the `dotnet` on PATH, .NET's default location. With none it stops
 once, up front, with the fix. `bash scripts/ensure_dotnet8.sh` (needs internet; on a cluster login
 node its download moves itself to a compute node) installs both runtimes there, and adds
@@ -271,14 +286,17 @@ the scripts handle it.
   `notes`. Never tell the biologist to "install R/limma/..." by hand.
 - macOS + DIA data + no Docker → run `build_diann_docker.sh` and relay its exact
   steps (install Docker Desktop, open once). Don't silently switch to a DDA engine.
-- macOS + DDA + Bruker `.d` → msconvert is Linux-only on bioconda; see
-  `references/install.md` ("macOS + Sage"). Prefer DIA-NN if the data is DIA; else convert
-  to mzML first. Thermo `.raw` is converted with ThermoRawFileParser (bioconda has a macOS
-  build).
-- Unrecognised instrument → parameters fall back to automatic mass calibration;
-  say so plainly. This is never a stop: no organism or instrument is "unsupported".
+- macOS + Bruker `.d` DDA → a quantifying Sage search needs a `.d` converter this Mac does
+  not have ("macOS + Sage + Bruker/Thermo" above): run the search on HIVE, or convert to mzML
+  elsewhere first. Thermo `.raw` is converted here with ThermoRawFileParser (bioconda has a
+  macOS build).
+- Instrument or acquisition not recognised → **ask the user which instrument and acquisition
+  it is**; never guess into a multi-hour run. Still unknown after asking: the search falls back
+  to DIA-NN's automatic mass calibration, which DIA-NN calls "for preliminary analyses only"
+  and which is not parallel-safe, so a cohort runs as one single-node search
+  (`parameters.md`). Tell the user that, and include it in the one confirmation. It is never a
+  refusal: no organism or instrument is "unsupported".
 - FragPipe license (MSFragger/IonQuant) → surface the `tools.json` note and the fix.
-- Acquisition/instrument unknown → ask the user; never guess into a multi-hour run.
 
 ## Step 0: the one-time setup, and what `setup.json` says
 
@@ -298,7 +316,7 @@ source ~/.proteomics-pipeline/activate.sh        # puts R, python, sage on PATH
 `setup.sh` installs micromamba (no admin), then a conda env with R + limpa +
 limma + arrow + Sage + Python/pyarrow, and writes `~/.proteomics-pipeline/setup.json`.
 It also provisions **.NET 8** (`scripts/ensure_dotnet8.sh`, Linux and macOS: one root in
-`~/.proteomics-pipeline/dotnet8` with Microsoft.NETCore.App ≥ 8.0.17 + AspNetCore, which
+`$PP_HOME/dotnet8` (default `~/.proteomics-pipeline/dotnet8`) with Microsoft.NETCore.App ≥ 8.0.17 + AspNetCore, which
 DIA-NN's `.raw` reader, the Core's ThermoRawFileParser and the resolution reader all use)
 and installs `thermorawfileparser`, `pythonnet` and `pandas` into the env in their own step,
 so an existing env gets them on a re-run. Neither step is fatal — `setup.json`'s
@@ -322,6 +340,12 @@ Read `setup.json` and **gate on `ready_for`**:
 - `ready_for.dia` false → on macOS this means Docker is missing. Run
   `bash scripts/build_diann_docker.sh` and relay its instructions (install Docker
   Desktop, open it once), then continue. Don't silently fall back to a DDA engine.
+- `ready_for.dia_raw` (2.15.1) — can DIA-NN read Thermo `.raw` here: `true` when DIA-NN can run
+  and `ensure_dotnet8.sh` gave a .NET 8 root (`dotnet8.root`); `false` when it could not
+  (`dotnet8.note` says why; `next_steps.dia_raw` is the fix); `null` when not checked (`--check`
+  runs no `ensure_dotnet8.sh`; on macOS DIA-NN runs in Docker, whose image is not checked here).
+  Only matters for `.raw` input to DIA-NN, and a `.raw` search runs `ensure_dotnet8.sh` again
+  itself. `ready_for.dia` stays "a DIA search can run" (`.d` and mzML need no .NET).
 - `ready_for.dda` false → Sage/R not ready, or (macOS) msconvert is unavailable for
   `.d`/`.raw` → mzML; tell the user and, if their data is DIA, route to DIA-NN.
 - `ready_for.thermo_raw` false **and the input has Thermo `.raw`** → fix it before step 2:

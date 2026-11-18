@@ -9,7 +9,7 @@
 #
 # This script verifies those answers against reality so the orchestrator doesn't
 # just take the user's word for it:
-#   on_hive                     this machine is a HIVE node (sbatch present)
+#   on_hive                     this machine is a HIVE node (HPC@UCD's cluster file says hive)
 #   local_proteomics_grp_access /quobyte/proteomics-grp is readable HERE
 #   hive_ssh                    if not on HIVE and a user is given, can we SSH in? and
 #                               does that HIVE account have sbatch + proteomics-grp access?
@@ -92,7 +92,10 @@ HIVE_HOST="${HIVE_HOST:-hive.hpc.ucdavis.edu}"
 # HIVE's host keys, from ssh-keyscan 2026-09-23 -- the same list is in references/access.md.
 PUBLISHED_FP="SHA256:b5nv86Ciaqg1yrUVai6bZ0Hk4IpzAFLWtIPDBdacbQM SHA256:AmJ+z2miIMXlSAcm7k8YwKlIWk5+VqxyT0R4q3fvpcA"
 
-ON_HIVE=false; have sbatch && ON_HIVE=true
+# HIVE is recognised by its OWN marker (hive_marker.sh), not by sbatch being on PATH: a non-login
+# shell on HIVE has no sbatch on PATH, and another SLURM cluster is not HIVE.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hive_marker.sh"
+ON_HIVE=false; is_hive && ON_HIVE=true
 GRP=false; [ -d /quobyte/proteomics-grp ] && ls /quobyte/proteomics-grp >/dev/null 2>&1 && GRP=true
 
 # A Core member, 2026-09-23, Git Bash on Windows 11: python3 was the Microsoft Store alias in
@@ -195,7 +198,7 @@ elif ! $ON_HIVE && [ -n "$HU" ] && [ "$KEY_FOUND" = true ]; then
   out="$(${TMO[@]+"${TMO[@]}"} ssh ${KEY_OPT[@]+"${KEY_OPT[@]}"} \
         -o BatchMode=yes -o ConnectTimeout=12 -o IdentitiesOnly=yes -o StrictHostKeyChecking=$HKC \
         "$HU@$HIVE_HOST" \
-        "bash -l -c 'command -v sbatch >/dev/null 2>&1 && echo HAS_SBATCH; ls /quobyte/proteomics-grp >/dev/null 2>&1 && echo HAS_GRP$CK_PROBE$STAFF_PROBE'" 2>"$ERRF" </dev/null)"
+        "bash -l -c '{ command -v sbatch >/dev/null 2>&1 || [ -x /cvmfs/hpc.ucdavis.edu/sw/spack/environments/core/view/generic/slurm/bin/sbatch ]; } && echo HAS_SBATCH; ls /quobyte/proteomics-grp >/dev/null 2>&1 && echo HAS_GRP$CK_PROBE$STAFF_PROBE'" 2>"$ERRF" </dev/null)"
   rc=$?
   if [ -n "$out" ]; then
     HIVE_SSH="ok"; CK_OUT="$out"

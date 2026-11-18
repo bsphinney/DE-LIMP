@@ -89,6 +89,9 @@ class Harness(unittest.TestCase):
         e.update({"PATH": self.bin + os.pathsep + e["PATH"], "FAKE_SRUN_LOG": self.srun_log,
                   "FAKE_ASSOC": LAB, "USER": "staff1",
                   "UCD_HPC_CLUSTER_CONF": os.path.join(self.d, "no-cluster-file"),
+                  # these tests simulate HIVE (its associations, its queues): run_search.
+                  # cluster_is_hive() knows it by the group folder when there is no cluster file
+                  "HIVE_GROUP_DIR": self.d,
                   "HPCCF_SLURM_BIN": os.path.join(self.d, "no-slurm-bin")})
         e.update(extra)
         return e

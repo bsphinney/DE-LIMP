@@ -108,6 +108,27 @@ SOP_MASS_ACC_SOURCE = ("the facility's validated SOP tolerance for the Orbitraps
 # a contaminant can be told apart from a target protein by the peptides this search looks for.
 DIANN_DIGEST = {"cut": "K*,R*", "missed_cleavages": 1, "min_pep_len": 7, "max_pep_len": 30,
                 "met_excision": True}
+# The precursor charge and fragment m/z ranges every DIA-NN cfg searches (build_diann()), and the
+# Radiant route's library too (diann_library_flags()). One definition each.
+DIANN_PR_CHARGE = (2, 4)
+DIANN_FR_MZ = (200, 1800)
+
+
+def diann_library_flags():
+    """The DIA-NN flags that shape a predicted library the same way build_diann() shapes the
+    DIA-NN search: the digest (DIANN_DIGEST), the precursor charge range and the fragment m/z
+    range. For a library predicted outside a cfg -- the Radiant route's
+    (make_radiant_library.py), which used to get DIA-NN's command-line defaults instead: no Met
+    excision, charge 1 included (audit 2026-11-17, lane 1 #2). Not the precursor m/z range: that
+    follows the acquisition, which that route does not read -- DIA-NN's default applies there
+    and the library's record says so. Cysteine is cys_diann_flags()."""
+    d = DIANN_DIGEST
+    return (["--cut", d["cut"], "--missed-cleavages", str(d["missed_cleavages"]),
+             "--min-pep-len", str(d["min_pep_len"]), "--max-pep-len", str(d["max_pep_len"]),
+             "--min-pr-charge", str(DIANN_PR_CHARGE[0]),
+             "--max-pr-charge", str(DIANN_PR_CHARGE[1]),
+             "--min-fr-mz", str(DIANN_FR_MZ[0]), "--max-fr-mz", str(DIANN_FR_MZ[1])]
+            + (["--met-excision"] if d["met_excision"] else []))
 
 # DIA-NN's DDA switch. The ONE definition of "this cfg searches DDA": build_diann() writes it for
 # --acquisition DDA, and diann_parallel.py reads it back (the chain's routing, the refusal of a
@@ -583,6 +604,44 @@ class LoneMassAccOverride(ValueError):
     MS2 -- so MS1 ran at 20 ppm instead of its documented 7, and nothing said so."""
 
 
+# The FASTA sidecar fetch_fasta.py writes in a session (SKILL.md step 6), used when --fasta-meta
+# is not given -- the default run_de.R's --fasta-meta has too.
+DEFAULT_FASTA_META = "./search.fasta.meta.json"
+
+
+class PtmSearchRefused(ValueError):
+    """A DIA-NN --var-mod for a PTM whose sites are the point of the experiment (phospho,
+    K-GG). The skill searches and reports PROTEINS: such a search ran with --var-mods 1 (at most
+    one site per peptide) and the default charge range, against DIA-NN's PTM advice ("max 3
+    variable modifications ... precursor charge range 2-3"), and its DE was protein-level, with
+    nothing said (audit 2026-11-17, lane 1 #6). Refused until a site-level route exists."""
+
+
+# The PTMs refused as a DIA-NN --var-mod, by UniMod delta mass (a name can be spelled any way:
+# "UniMod:21", "Phospho(STY)"). DIA-NN's README names both as PTM workflows with their own
+# settings. 0.002 Da: well inside any mass written to 4 decimals, far from any other mod.
+PTM_SITE_MODS = {79.966331: "phosphorylation (UniMod:21)",
+                 114.042927: "K-GG, the ubiquitination remnant (UniMod:121)"}
+PTM_REFUSAL = ("{what}: {mod}. This skill searches and reports proteins, not modification "
+               "sites. A site analysis needs DIA-NN's PTM settings (its README: at most 3 "
+               "variable modifications, charge 2-3, the site report) and a site-level "
+               "statistical analysis, which the skill does not do. No cfg was written. For a "
+               "phospho or ubiquitin study, ask the Proteomics Core.")
+
+
+def ptm_site_mod(value):
+    """The PTM_SITE_MODS entry a DIA-NN `--var-mod [name],[mass],[sites]` value searches, or
+    None."""
+    parts = str(value).split(",")
+    if len(parts) < 2:
+        return None
+    try:
+        mass = float(parts[1])
+    except ValueError:
+        return None
+    return next((name for m, name in PTM_SITE_MODS.items() if abs(mass - m) < 0.002), None)
+
+
 class NoPrecursorRange(ValueError):
     """A DIA-NN DDA cfg with no --precursor-mz-range. It used to fall back to 380-980, and
     SKILL.md told the agent to omit the range for DDA: SET28's Exploris DDA surveyed 350-1500 and
@@ -631,8 +690,8 @@ def ppm_for_resolution(res):
 
     Returns (ppm, source), or (None, why) when the table has nothing to say.
 
-    Exact tiers use the documented value. Between 30k and 240k the value is interpolated on a
-    log-log fit of the table and TAGGED as interpolated. Outside that range there is NO value:
+    Exact tiers use the documented value. Between 30k and 240k the value is interpolated
+    log-log between the two neighbouring tiers and TAGGED as interpolated. Outside that range there is NO value:
     the old extrapolation turned an Exploris 480's 15,000 MS2 into 23.3 ppm and pinned it for a
     whole cohort, with nothing but a curve fit behind it -- and 15k is not a corner case, it is
     what both Orbitraps in the FRAN re-search pilot (2026-09-16) acquire MS2 at. A number with no
@@ -647,8 +706,12 @@ def ppm_for_resolution(res):
     if not pts[0][0] <= res <= pts[-1][0]:
         return None, (f"{int(res):,} is outside DIA-NN's documented 30k-240k Orbitrap table, "
                       "not extrapolated")
-    # log(ppm) is close to linear in log(resolution) across the documented tiers
-    (r1, p1), (r2, p2) = pts[0], pts[-1]
+    # log-log between the two NEIGHBOURING tiers, so the line passes through every documented
+    # value. It used to run through the two END tiers only (30k and 240k), which misses the
+    # documented 60k and 120k: 110k came out at 6.6 ppm, tighter than the 7 documented for
+    # 120k (audit 2026-11-17, lane 1 #10).
+    (r1, p1), (r2, p2) = next((lo, hi) for lo, hi in zip(pts, pts[1:])
+                              if lo[0] <= res <= hi[0])
     slope = (math.log(p2) - math.log(p1)) / (math.log(r2) - math.log(r1))
     ppm = round(math.exp(math.log(p1) + slope * (math.log(res) - math.log(r1))), 1)
     return ppm, f"{SRC_TABLE}, interpolated for {int(res):,} resolution"
@@ -844,7 +907,35 @@ def classify_instrument(name, ms1_res=None, ms2_res=None, res_source=None, ms2_a
             ms1_src = (f"MS1 {int(ms1_res):,}: {s1}" if p1 is not None else
                        f"MS1 {int(ms1_res):,}: no documented DIA-NN value ({s1})")
         return ("orbitrap_iontrap", p1, None, label, f"{ms1_src}; MS2: {ms2_src}")
-    # A given resolution beats any model-name guess.
+    # A non-Orbitrap name beats a given resolution (audit 2026-11-17, lane 1 #11): a timsTOF or
+    # SCIEX TOF has no Orbitrap resolution, and an Astral's MS2 is read in the Astral analyser,
+    # not an Orbitrap, so DIA-NN's Orbitrap table says nothing about it -- ("Orbitrap Astral",
+    # 240000, 80000) used to give MS2 8.0 ppm instead of the README's Astral 10. An Astral's MS1
+    # IS an Orbitrap: a given, tabled MS1 resolution sets that level.
+    ignored = (f" (the given resolution was not used: {('MS1 ' + format(int(ms1_res), ',')) if ms1_res else ''}"
+               f"{' / ' if ms1_res and ms2_res else ''}"
+               f"{('MS2 ' + format(int(ms2_res), ',')) if ms2_res else ''} -- not an Orbitrap "
+               f"level)") if (ms1_res or ms2_res) else ""
+    if "astral" in n:
+        a1, a2 = DIANN_INSTRUMENT_PPM["orbitrap_astral"]
+        p1, s1 = ppm_for_resolution(ms1_res)
+        if p1 is not None:
+            return ("orbitrap_astral", p1, a2,
+                    f"Orbitrap Astral, MS1 {int(ms1_res):,} resolution {origin}",
+                    f"MS1 {int(ms1_res):,}: {s1}; MS2: {SRC_DIANN} (Astral analyser)")
+        note = (f" (MS2 {int(ms2_res):,} not used: the Astral analyser is not an Orbitrap)"
+                if ms2_res and not ms1_res else
+                f" (MS1 {int(ms1_res):,}: {s1}, so the README's Astral value is used)"
+                if ms1_res else "")
+        return ("orbitrap_astral", a1, a2, "Orbitrap Astral (assumes 240k MS1)",
+                SRC_DIANN + note)
+    if "tims" in n:
+        return ("timstof", *DIANN_INSTRUMENT_PPM["timstof"],
+                "Bruker timsTOF (dia-PASEF / ddaPASEF)", SRC_DIANN + ignored)
+    if "tripletof" in n or "zenotof" in n or "sciex" in n:
+        return ("sciex_tof", *DIANN_INSTRUMENT_PPM["sciex_tof"], "SCIEX TripleTOF / ZenoTOF",
+                SRC_DIANN + ignored)
+    # A given resolution beats any Orbitrap model-name guess.
     if ms1_res or ms2_res:
         p1, s1 = ppm_for_resolution(ms1_res)
         p2, s2 = ppm_for_resolution(ms2_res)
@@ -863,12 +954,6 @@ def classify_instrument(name, ms1_res=None, ms2_res=None, res_source=None, ms2_a
                     f"{origin}", src)
     if not n:
         return ("unknown", None, None, "instrument not detected", "auto-calibration fallback")
-    if "astral" in n:
-        return ("orbitrap_astral", *DIANN_INSTRUMENT_PPM["orbitrap_astral"], "Orbitrap Astral (assumes 240k MS1)", SRC_DIANN)
-    if "tims" in n:
-        return ("timstof", *DIANN_INSTRUMENT_PPM["timstof"], "Bruker timsTOF (dia-PASEF / ddaPASEF)", SRC_DIANN)
-    if "tripletof" in n or "zenotof" in n or "sciex" in n:
-        return ("sciex_tof", *DIANN_INSTRUMENT_PPM["sciex_tof"], "SCIEX TripleTOF / ZenoTOF", SRC_DIANN)
     # Orbitrap family with no resolution to work from -> measured with DIA-NN (DIA-NN route).
     # Passing --ms1-resolution/--ms2-resolution (read_mzml_resolution() gets them straight out
     # of the mzML) lets a documented tier pin it instead.
@@ -1042,13 +1127,13 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     # of the predicted library. That is the right call for tryptic bottom-up work
     # (z=1 precursors are rarely informative), but a reader must be able to see
     # that a deliberate narrowing was applied on their behalf.
-    add("--min-pr-charge", 2,
+    add("--min-pr-charge", DIANN_PR_CHARGE[0],
         "z=1 excluded: rarely informative for tryptic bottom-up. DIA-NN's own "
         "default is 1-4; this drops ~19% of the predicted library (measured: "
         "10,899 -> 8,805 precursors on a 60-protein FASTA)")
-    add("--max-pr-charge", 4, UNIV)
-    add("--min-fr-mz", 200, UNIV)
-    add("--max-fr-mz", 1800, UNIV)
+    add("--max-pr-charge", DIANN_PR_CHARGE[1], UNIV)
+    add("--min-fr-mz", DIANN_FR_MZ[0], UNIV)
+    add("--max-fr-mz", DIANN_FR_MZ[1], UNIV)
     if DIANN_DIGEST["met_excision"]:
         add("--met-excision", True, UNIV)
     # cysteine: what the sample prep did to it (CYS_REAGENTS), tagged with who said so
@@ -1194,6 +1279,11 @@ def build_diann(acq, instr_class, ms1, ms2, label, src, var_mods, overrides,
     for k, v in (overrides or {}).items():
         src_o = override_source(k, v, om.get("reason"), om.get("role", staff.USER_ROLE))
         if k in DIANN_ADDED_FLAGS:
+            for x in (v if isinstance(v, (list, tuple)) else [v]):
+                ptm = ptm_site_mod(x)
+                if ptm:
+                    raise PtmSearchRefused(PTM_REFUSAL.format(
+                        what=f"--overrides {k} {x} searches a site-level PTM", mod=ptm))
             have = [ln[len(k) + 1:] for ln in lines if ln.startswith(k + " ")]
             new = []
             for x in (v if isinstance(v, (list, tuple)) else [v]):
@@ -1281,7 +1371,8 @@ def sage_ppm(instr_class):
 #     { "da": [-0.4, 0.4] } }"
 #   https://sage-docs.vercel.app/docs/configuration/spectra -- "Recommended settings for low-res
 #     MS/MS { "deisotope": false, "min_peaks": 15, "max_peaks": 150, "min_matched_peaks": 4,
-#     "max_fragment_charge": 2 }" (the last four are what every Sage cfg here already uses)
+#     "max_fragment_charge": 2 }" (min_peaks / max_peaks / min_matched_peaks are what every Sage
+#     cfg here uses; max_fragment_charge 2 is the LOW-res value -- see SAGE_MAX_FRAGMENT_CHARGE)
 #   https://sage-docs.vercel.app/docs/configuration -- bucket_size: "Use a lower value (8192) for
 #     high-res MS/MS, and higher values for low-res MS/MS", 32768 in the same example
 # The Da form is valid in the pinned 0.14.7: crates/sage/src/mass.rs has
@@ -1291,6 +1382,24 @@ def sage_ppm(instr_class):
 SAGE_ITMS_FRAGMENT_DA = 0.4
 SAGE_ITMS_BUCKET_SIZE = 32768
 SRC_SAGE_LOWRES = "Sage docs' low-res MS/MS setting (sage-docs.vercel.app/docs/configuration)"
+# max_fragment_charge, by MS2 resolution, as Sage's docs recommend it
+# (sage-docs.vercel.app/docs/configuration/spectra, read 2026-11-17): high-res MS/MS
+# { "deisotope": true, ..., "max_fragment_charge": 1 } -- deisotoping already reduces every fragment
+# to charge 1 -- and low-res { "deisotope": false, ..., "max_fragment_charge": 2 }. Up to 2.15.0
+# every cfg here wrote 2, the low-res value, for high-res MS2 too (audit 2026-11-17, L2-8).
+SAGE_MAX_FRAGMENT_CHARGE = {"high_res": 1, "low_res": 2}
+SRC_SAGE_HIGHRES = "Sage docs' high-res MS/MS setting (sage-docs.vercel.app/docs/configuration/spectra)"
+# Sage's chimeric search ("chimera") does nothing unless report_psms > 1 (Sage docs, configuration/
+# additional: "This feature requires that report_psms > 1 to have any special effect"; v0.14.7
+# scoring.rs score_chimera_fast loops `while candidates.len() < self.report_psms`). Up to 2.15.0
+# every DDA cfg wrote chimera true with report_psms unset (1): a no-op the record called "on"
+# (audit 2026-11-17, L2-5). Off, and said so: switching it on needs report_psms 2, which changes
+# the identifications and Sage's FDR input (rank-2 PSMs) and is not yet checked on real data.
+SAGE_CHIMERA = False
+SRC_SAGE_CHIMERA = ("off: Sage's chimeric search needs report_psms > 1 (Sage docs, "
+                    "configuration/additional), which this skill does not use yet (one PSM per "
+                    "spectrum); before 2.15.1 chimera was written as true with report_psms 1, "
+                    "which did nothing")
 
 
 # The skill's DDA digest, in Sage's database.enzyme form: trypsin with the proline rule (cut after
@@ -1304,6 +1413,13 @@ SRC_SAGE_LOWRES = "Sage docs' low-res MS/MS setting (sage-docs.vercel.app/docs/c
 DDA_DIGEST = {"missed_cleavages": 2, "min_len": 7, "max_len": 30,
               "cleave_at": "KR", "restrict": "P"}
 SAGE_ENZYME = DDA_DIGEST
+# The 7-30 length cap is the FACILITY's choice, not Sage's default (5-50) or FragPipe LFQ-MBR's
+# (7-50): it is DIA-NN's, so the DDA engines search the peptides the contaminant check judged
+# (fetch_fasta.py), and the broad-digest job memory (run_search.py BROAD_DIGEST_*) was measured
+# with it. Said in the rationale so the Methods never present it as an engine default (audit
+# 2026-11-17, L2-9; moving tryptic DDA to 50 waits for a HIVE re-measure of memory and counts).
+SRC_DDA_LENGTHS = ("peptide length 7-30: the facility's DDA cap (DIA-NN's lengths, shared by the "
+                   "DDA engines; Sage's own default is 5-50, FragPipe LFQ-MBR's 7-50)")
 
 
 # --ids-only: a Sage search for identifications only, with no LFQ (no differential expression).
@@ -1400,6 +1516,16 @@ def check_sage_overrides(over, _at=()):
         return
     for k, v in over.items():
         at = _at + (k,)
+        if at == ("database", "variable_mods") and isinstance(v, dict):
+            # 2.15.1 follow-up: the same refusal as DIA-NN's --var-mod (PTM_SITE_MODS), so SKILL.md's
+            # "never add a PTM through --overrides" holds on both engines
+            for res, masses in v.items():
+                for m in (masses if isinstance(masses, (list, tuple)) else [masses]):
+                    ptm = ptm_site_mod(f"x,{m}")
+                    if ptm:
+                        raise PtmSearchRefused(PTM_REFUSAL.format(
+                            what=f"--overrides database.variable_mods {res}: {m} searches a "
+                                 "site-level PTM", mod=ptm))
         if at in SAGE_REPLACED_WHOLE and not _one_window(v):
             # review F5: {} (or two units, or one number) wrote a cfg Sage cannot read, and the
             # job failed only once it had queued
@@ -1476,7 +1602,7 @@ SAGE_RATIONALE_PATHS = {
     "bucket_size": ("database", "bucket_size"), "wide_window": ("wide_window",),
     "chimera": ("chimera",), "static_mods": ("database", "static_mods"),
     "variable_mods": ("database", "variable_mods"), "enzyme": ("database", "enzyme"),
-    "lfq": ("quant", "lfq"),
+    "lfq": ("quant", "lfq"), "max_fragment_charge": ("max_fragment_charge",),
 }
 SAGE_DERIVED_NUMBERS = ("precursor_tol_ppm", "fragment_tol_ppm", "fragment_tol_da")
 
@@ -1522,11 +1648,11 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, overrid
                          else {"ppm": [-float(frag_ppm), float(frag_ppm)]}),
         "isotope_errors": [0, 1],
         "deisotope": not ion_trap,
-        "chimera": acq.upper() == "DDA",
+        "chimera": SAGE_CHIMERA,
         "wide_window": acq.upper() == "DIA",
         "predict_rt": True,
         "min_peaks": 15, "max_peaks": 150, "min_matched_peaks": 4,
-        "max_fragment_charge": 2,
+        "max_fragment_charge": SAGE_MAX_FRAGMENT_CHARGE["low_res" if ion_trap else "high_res"],
         "quant": {"lfq": not ids_only},
         "output_directory": "sage_out",
     }
@@ -1550,18 +1676,26 @@ def build_sage(acq, instr_class, var_mods, overrides, ms2_analyzer=None, overrid
             "deisotope": tagged(cfg.get("deisotope"), f"{it}: {SRC_SAGE_LOWRES}"),
             "bucket_size": tagged(db.get("bucket_size"), f"{it}: {SRC_SAGE_LOWRES} ('higher "
                                                          "values for low-res MS/MS')"),
+            "max_fragment_charge": tagged(cfg.get("max_fragment_charge"),
+                                          f"{it}: {SRC_SAGE_LOWRES}"),
         })
     else:
         rationale["fragment_tol_ppm"] = tagged(frag_ppm, ppm_src)
+        rationale["max_fragment_charge"] = tagged(cfg.get("max_fragment_charge"),
+                                                  f"high-res MS2, deisotoped: {SRC_SAGE_HIGHRES}")
     rationale.update({
         "wide_window": tagged(cfg.get("wide_window"), f"{acq.upper()} acquisition"),
-        "chimera": tagged(cfg.get("chimera"), f"{acq.upper()} acquisition"),
+        "chimera": tagged(cfg.get("chimera"), SRC_SAGE_CHIMERA),
         "static_mods": tagged(db.get("static_mods"),
                               (f"fixed {cys['mod'].lower()} (C) -- " if static else
                                "none: cysteine searched unmodified -- ") + cys["source"]),
         "variable_mods": tagged(db.get("variable_mods"),
                                 vm_src + "; + protein N-term acetyl (always)"),
-        "enzyme": tagged(db.get("enzyme"), enzyme_source(enzyme) if enzyme else UNIV),
+        "enzyme": tagged(db.get("enzyme"), (enzyme_source(enzyme) if enzyme else UNIV)
+                         + ("; " + SRC_DDA_LENGTHS
+                            if (db.get("enzyme") or {}).get("max_len") == DDA_DIGEST["max_len"]
+                            and (db.get("enzyme") or {}).get("min_len") == DDA_DIGEST["min_len"]
+                            else "")),
         "lfq": tagged(_cfg_at(cfg, ("quant", "lfq")),
                       SRC_IDS_ONLY if ids_only else "label-free quantification"),
     })
@@ -1913,7 +2047,8 @@ def main():
                          "acquired outside that window -- and a DIA-NN DDA cfg is refused.")
     ap.add_argument("--fasta-meta", default="",
                     help="fetch_fasta.py's <fasta>.meta.json — supplies the contaminant "
-                         "tag so DIA-NN excludes contaminants from quant")
+                         f"tag so DIA-NN excludes contaminants from quant (default: "
+                         f"{DEFAULT_FASTA_META} if present, as run_de.R does)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     # --var-mods (an unknown word stops here, before anything is written: VAR_MODS; blank, or a
@@ -1929,6 +2064,18 @@ def main():
     by, by_how, role = dda["by"], dda["by_how"], dda["role"]
 
     cont_tag = None
+    if not a.fasta_meta and a.engine == "diann" and os.path.isfile(DEFAULT_FASTA_META):
+        # Audit 2026-11-17, lane 1 #12: without the sidecar the cfg had no --cont-quant-exclude,
+        # so contaminants took part in DIA-NN's normalisation. The session's own sidecar, at the
+        # name step 6 writes it, is used when none is given -- the same default run_de.R has.
+        a.fasta_meta = DEFAULT_FASTA_META
+        print(f"[estimate_params] --fasta-meta not given: using {os.path.abspath(a.fasta_meta)} "
+              "(the session's FASTA sidecar)", file=sys.stderr)
+    elif not a.fasta_meta and a.engine == "diann":
+        print("[estimate_params] WARNING: no FASTA sidecar (--fasta-meta, or "
+              f"{DEFAULT_FASTA_META}), so the cfg has no --cont-quant-exclude: contaminants "
+              "take part in DIA-NN's normalisation (the DE still removes them). Pass the "
+              "sidecar fetch_fasta.py wrote.", file=sys.stderr)
     if a.fasta_meta:
         try:
             with open(a.fasta_meta) as fh:
@@ -1965,7 +2112,7 @@ def main():
                                           overrides, cont_tag, a.precursor_mz_range,
                                           level_src=level_src, override_meta=override_meta,
                                           cys=cys, labels=labels)
-        except (LoneMassAccOverride, NoPrecursorRange) as e:
+        except (LoneMassAccOverride, NoPrecursorRange, PtmSearchRefused) as e:
             # build_diann() raises BEFORE the write below; a stale cfg with a stale
             # mass_accuracy_plan must not outlive the refusal (refuse_out)
             refuse_out(a.out, str(e))
@@ -1974,6 +2121,8 @@ def main():
             text, rationale = build_sage(a.acquisition, cls, var_mods, overrides, analyzer,
                                          override_meta=override_meta, cys=cys,
                                          ids_only=a.ids_only, enzyme=dda["enzyme"])
+        except PtmSearchRefused as e:              # its message already says no cfg was written
+            refuse_out(a.out, str(e))
         except (OverrideRefused, cleavage_rules.EnzymeError) as e:
             refuse_out(a.out, f"{str(e).rstrip('.')}. No cfg was written.")
 

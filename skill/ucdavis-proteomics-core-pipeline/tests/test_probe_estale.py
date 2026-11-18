@@ -262,10 +262,11 @@ else echo '{"window_radius": null, "stopped_because": "max_failures", "failed": 
 exit "$rc"
 """
 
-    def _run(self, d, rcs, budget=None):
+    def _run(self, d, rcs, budget=None, fallback=True):
         fake = _exe(os.path.join(d, "fake_probe"), self.FAKE_PROBE)
         ev, wtxt, fb = (os.path.join(d, n) for n in ("window.json", "window.txt", "fb.json"))
-        kw = dict(reset=["echo reset >> \"$RESETS\""], window_file=wtxt, fallback_out=fb)
+        kw = dict(reset=["echo reset >> \"$RESETS\""], window_file=wtxt, fallback_out=fb,
+                  fallback=fallback)
         if budget is None:
             lines = dp.probe_attempts(f"bash {fake}", "--qvalue 0.01", ev, ["window"], {}, **kw)
         else:
@@ -349,6 +350,19 @@ exit "$rc"
         self.assertEqual(set(probe_window.EXIT_MEANING), {2, 3, 4, 5, 6, 9})
         # out of memory is never retried or fallen back past: the job's memory is the cause
         self.assertNotIn(probe_window.EXIT_OOM, probe_window.FALLBACK_ON)
+
+    def test_without_a_fallback_a_machinery_failure_is_retried_and_then_left_to_the_caller(self):
+        """fallback=False (the chain's window probe, window_fallback_allowed()): the same
+        retry, but probe_fallback.py never runs and PROBE_FALLBACK stays 0."""
+        self.assertFalse(dp.window_fallback_allowed(["window"]))
+        self.assertFalse(dp.window_fallback_allowed(["window", "mass-acc"]))
+        self.assertTrue(dp.window_fallback_allowed(["mass-acc"]))
+        for rcs in ([1, 1], [7, 7], [probe_window.EXIT_TIMED_OUT]):
+            with self.subTest(rcs=rcs), tempfile.TemporaryDirectory() as d:
+                p, state, f = self._run(d, rcs, fallback=False)
+                self.assertEqual(state, f"RC={rcs[-1]} FB=0 N={len(rcs)}")
+                self.assertFalse(os.path.exists(f["window.txt"]))
+                self.assertFalse(os.path.exists(f["fb"]))
 
     def test_no_retry_without_the_time_for_one(self):
         with tempfile.TemporaryDirectory() as d:
@@ -577,53 +591,45 @@ class Step1bEstaleChainTests(unittest.TestCase):
             self.assertEqual(prov["scan_window"]["mode"], "measured")
             self.assertNotIn("probe_fallback", prov)
 
-    def test_estale_every_time_falls_back_and_steps_2_to_5_run_without_a_window(self):
+    def test_estale_every_time_fails_step1b_and_steps_2_to_5_refuse_auto(self):
+        """2.15.1 (audit 2026-11-17, lane 1 #4): no window fallback. Up to 2.15.0 this wrote
+        window.txt `auto` and steps 2-5 ran with no --window -- a radius per run, with .quant
+        reuse in steps 3 and 5."""
         with tempfile.TemporaryDirectory() as d:
             out = self._chain(d)
             p = self._run(d, out, "step1b_window.sbatch", estale="always")
             log = p.stdout + p.stderr
-            self.assertEqual(p.returncode, 0, log)
+            self.assertNotEqual(p.returncode, 0, log)
             self.assertNotIn("Traceback", log)
             self.assertIn("retrying once", log)
-            self.assertIn("scan window = auto -- FALLBACK", log)
-            self.assertEqual(_read(os.path.join(out, "window.txt")).strip(), "auto")
-            fb = json.loads(_read(os.path.join(out, dp.FALLBACK_RECORD)))
-            self.assertIn("the probe could not read its own DIA-NN log", fb["reason"])
-            self.assertIn("I/O error on the probe log: "
-                          f"OSError: [Errno {errno.ESTALE}] {STALE};", fb["reason"])
+            self.assertIn("FAILED: step 1b could not measure the scan-window radius", log)
+            self.assertIn("pin --window N in the cfg", log)
+            self.assertNotIn("FALLBACK", log)
+            for gone in ("window.txt", "params.resolved.cfg", dp.FALLBACK_RECORD):
+                self.assertFalse(os.path.exists(os.path.join(out, gone)), gone)
+            w = json.loads(_read(os.path.join(out, "window.json")))
+            self.assertEqual(w["failure"], "io_error")
             prov = json.loads(_read(os.path.join(out, "search_provenance.json")))
-            self.assertIn("fallback (probe failed: ", prov["scan_window"]["source"])
-            self.assertEqual(prov["scan_window"]["mode"], "fallback_auto")
-            self.assertEqual(prov["result"]["scan_window"]["mode"], "fallback_auto")
-            resolved = _read(os.path.join(out, "params.resolved.cfg"))
-            self.assertNotIn("--window", resolved)
-            # steps 2-5: the guard takes `auto` beside the fallback's record, and DIA-NN gets
-            # no --window
-            for name in ("step2_firstpass.sbatch", "step3_assembly.sbatch",
-                         "step4_finalpass.sbatch", "step5_report.sbatch"):
-                argv_log = os.path.join(d, f"argv_{name}.txt")
-                s = self._run(d, out, name, FAKE_ARGV_LOG=argv_log, FAKE_SLEEP="0",
-                              SLURM_ARRAY_TASK_ID="0")
-                self.assertNotIn("does not hold", s.stderr, name)
-                self.assertNotIn("step 1b", s.stderr, name)
-                if os.path.exists(argv_log):
-                    self.assertNotIn("--window", _read(argv_log), name)
-            self.assertTrue(os.path.exists(os.path.join(d, "argv_step2_firstpass.sbatch.txt")),
-                            "step 2 never reached DIA-NN")
+            self.assertNotIn("probe_fallback", prov)
+            self.assertEqual(prov["scan_window"]["mode"], "measured", "the plan, untouched")
 
-            # S5: `auto` without the fallback's record -- deleted, or one that is not a window
-            # fallback -- stops steps 2-5 before DIA-NN
-            os.rename(os.path.join(out, dp.FALLBACK_RECORD), os.path.join(d, "kept.json"))
-            for record in (None, '{"fallback": true, "mass_acc": {"mode": "fallback_default"}}'):
+            # steps 2-5 refuse `auto` -- even beside a 2.15.0-style window-fallback record
+            with open(os.path.join(out, "window.txt"), "w") as fh:
+                fh.write("auto\n")
+            for record in (None, json.dumps({"fallback": True, "window": {
+                    "mode": "fallback_auto", "value": "auto"}}, indent=2)):
                 if record:
                     with open(os.path.join(out, dp.FALLBACK_RECORD), "w") as fh:
                         fh.write(record)
-                argv_log = os.path.join(d, "argv_guard.txt")
-                s = self._run(d, out, "step2_firstpass.sbatch", FAKE_ARGV_LOG=argv_log,
-                              FAKE_SLEEP="0", SLURM_ARRAY_TASK_ID="0")
-                self.assertNotEqual(s.returncode, 0)
-                self.assertIn("window.txt does not hold a scan-window radius", s.stderr)
-                self.assertFalse(os.path.exists(argv_log), "DIA-NN ran on an unrecorded `auto`")
+                for name in ("step2_firstpass.sbatch", "step3_assembly.sbatch",
+                             "step4_finalpass.sbatch", "step5_report.sbatch"):
+                    argv_log = os.path.join(d, f"argv_{name}.txt")
+                    s = self._run(d, out, name, FAKE_ARGV_LOG=argv_log, FAKE_SLEEP="0",
+                                  SLURM_ARRAY_TASK_ID="0")
+                    self.assertNotEqual(s.returncode, 0, name)
+                    self.assertIn("window.txt does not hold a scan-window radius", s.stderr,
+                                  name)
+                    self.assertFalse(os.path.exists(argv_log), f"{name}: DIA-NN ran on `auto`")
 
     def test_runs_diann_finished_without_a_radius_fail_step1b_not_fall_back(self):
         """S1: DIA-NN finished the runs and logged no radius -- a wrong FASTA or library, a large
@@ -862,16 +868,49 @@ class ProvenanceModeTests(unittest.TestCase):
         self.assertEqual((fb["window"]["mode"], fb["mass_acc"]["mode"]),
                          ("fallback_auto", "fallback_default"))
 
-    def test_the_chain_plan_says_measured_and_the_fallback_replaces_it_at_the_top_level(self):
-        """A mass-accuracy chain whose probe log goes stale on every run, twice: the documented
-        MS1 as given, the SOP MS2 tagged DEFAULT, and steps 2-5 get them with no --window."""
+    def test_a_window_and_mass_accuracy_probe_that_fails_twice_stops_the_chain(self):
+        """2.15.1 (audit 2026-11-17, lane 1 #4): a probe measuring the window too never falls
+        back. Up to 2.15.0 window.txt said `auto` and every array task chose its own radius,
+        with steps 3 and 5 reusing those .quant files. Now step 1b fails, nothing is pinned, the
+        plan in the provenance is untouched, and step 2 refuses to start."""
         with tempfile.TemporaryDirectory() as d:
             raws = fx._cohort(d)
             out, info = fx.Step1bMassAccChainTests._chain(self, d, raws)
             self.assertEqual(info["scan_window"]["mode"], "measured")
+            self.assertIn("step 1b FAILS", info["scan_window"]["if_probe_fails"])
+            with open(os.path.join(out, "search_provenance.json"), "w") as fh:
+                json.dump({"engine": "diann", "scan_window": info["scan_window"],
+                           "mass_acc": info["mass_acc"], "result": info}, fh)
+            base = {k: v for k, v in os.environ.items()
+                    if k not in ("DOTNET_ROOT", "PROTEOMICS_DOTNET_DIR")}
+            p = subprocess.run(["bash", os.path.join(out, "step1b_window.sbatch")], cwd=out,
+                               capture_output=True, text=True, timeout=240,
+                               env=job_env(d, base=base, **estale_env(d, "always")))
+            log = p.stdout + p.stderr
+            self.assertNotEqual(p.returncode, 0, log)
+            self.assertIn("FAILED: step 1b could not measure the scan-window radius", log)
+            self.assertIn("DependencyNeverSatisfied", log)
+            self.assertNotIn("FALLBACK", log)
+            for gone in ("window.txt", "massacc.txt", "params.resolved.cfg", dp.FALLBACK_RECORD):
+                self.assertFalse(os.path.exists(os.path.join(out, gone)), gone)
+            prov = json.loads(_read(os.path.join(out, "search_provenance.json")))
+            self.assertNotIn("probe_fallback", prov)
+            self.assertEqual(prov["scan_window"]["mode"], "measured", "the plan, untouched")
+            p2, argv_log = fx.Step1bMassAccChainTests._run_step(self, d, out,
+                                                                "step2_firstpass.sbatch")
+            self.assertNotEqual(p2.returncode, 0)
+            self.assertFalse(os.path.exists(argv_log), "DIA-NN ran without a measured window")
+
+    def test_a_mass_accuracy_only_probe_still_falls_back_to_one_value_for_every_step(self):
+        """--window pinned in the cfg, mass accuracy measured: the fallback pins the documented
+        MS1 and the SOP MS2 (DEFAULT) for every step -- one value, so it is kept."""
+        with tempfile.TemporaryDirectory() as d:
+            raws = fx._cohort(d)
+            out, info = fx.Step1bMassAccChainTests._chain(self, d, raws,
+                                                          cfg_extra="--window 9\n")
+            self.assertEqual(info["step1b_measures"], ["mass-acc"])
             self.assertEqual(info["mass_acc"]["mode"], "measured")
             with open(os.path.join(out, "search_provenance.json"), "w") as fh:
-                # as run_search.py writes it: scan_window and mass_acc at the top level too
                 json.dump({"engine": "diann", "scan_window": info["scan_window"],
                            "mass_acc": info["mass_acc"], "result": info}, fh)
             base = {k: v for k, v in os.environ.items()
@@ -883,19 +922,17 @@ class ProvenanceModeTests(unittest.TestCase):
             self.assertIn("mass accuracy = --mass-acc 20 --mass-acc-ms1 7 -- FALLBACK",
                           p.stdout + p.stderr)
             prov = json.loads(_read(os.path.join(out, "search_provenance.json")))
-            self.assertEqual(prov["scan_window"]["mode"], "fallback_auto")
+            self.assertEqual(prov["scan_window"]["mode"], "pinned")
             self.assertEqual(prov["mass_acc"]["mode"], "fallback_default")
             self.assertEqual(prov["result"]["mass_acc"], prov["mass_acc"])
             self.assertEqual(prov["mass_acc"]["default"], {"--mass-acc": 20.0})
             self.assertEqual(prov["mass_acc"]["documented"], {"--mass-acc-ms1": 7.0})
-            self.assertEqual(_read(os.path.join(out, "massacc.txt")).strip(),
-                             "--mass-acc 20 --mass-acc-ms1 7")
             p2, argv_log = fx.Step1bMassAccChainTests._run_step(self, d, out,
                                                                 "step2_firstpass.sbatch")
             self.assertNotIn("step 1b", p2.stderr)
             call = _read(argv_log)
             self.assertIn("--mass-acc 20 --mass-acc-ms1 7", call)
-            self.assertNotIn("--window", call)
+            self.assertIn("--window 9", call)
 
 
 class CautionTests(unittest.TestCase):

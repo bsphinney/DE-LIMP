@@ -12,7 +12,8 @@ The findings also become the report's "Audit & caveats" section.
 Checks:
   replication       groups with <2 (FAIL) or <3 (WARN) replicates
   group_balance     very unequal group sizes (WARN)
-  confounding       a covariate (Batch) perfectly confounded with Group (FAIL)
+  confounding       a covariate (Batch) perfectly confounded with Group (FAIL); two groups that
+                    share no value of it (WARN, 2.15.1)
   numeric_covariate a covariate fitted as a number (run_de.R --numeric-covariates) that nearly
                     matches the groups of a comparison (de_provenance.json `covariates`: its
                     `confounded` flag, the comparisons in `confounded_contrasts`, and run_de.R's
@@ -218,6 +219,9 @@ PLAIN = {
         "WARN": "The groups differ a lot in size, which lowers the power of the comparisons."}),
     "confounding": ("Batch and groups", {
         "PASS": "No batch or other recorded factor lines up exactly with the groups.",
+        "WARN": "Some groups were run in different batches from each other, so for the "
+                "comparisons between those groups a batch effect cannot be told apart from a real "
+                "difference.",
         "FAIL": "A batch or other recorded factor lines up exactly with the groups, so its effect "
                 "cannot be told apart from a real difference between the groups."}),
     "numeric_covariate": ("Measured factors in the statistics", {
@@ -505,7 +509,23 @@ def audit_conditions(findings, rows, adjp, block_col=None):
                     f"'{cov}' is perfectly confounded with Group — the batch/covariate effect cannot be "
                     f"separated from the biological effect. {dict((g, sorted(v)) for g, v in pairs.items())}")
             else:
-                add(findings, "confounding", "PASS", f"'{cov}' is not confounded with Group.")
+                # partial confounding (audit L2-11): two groups that share no value of the
+                # covariate cannot be compared apart from it, however the other groups fall
+                gs = sorted(pairs)
+                apart = [(a, b) for i, a in enumerate(gs) for b in gs[i + 1:]
+                         if not (pairs[a] & pairs[b])]
+                if apart:
+                    add(findings, "confounding", "WARN",
+                        f"'{cov}' is partly confounded with Group: "
+                        + "; ".join(f"{a} ({', '.join(sorted(pairs[a]))}) and {b} "
+                                    f"({', '.join(sorted(pairs[b]))}) share no '{cov}' value"
+                                    for a, b in apart)
+                        + f" -- a comparison between those groups cannot separate the '{cov}' "
+                          f"effect from the group effect.")
+                else:
+                    add(findings, "confounding", "PASS",
+                        f"'{cov}' is not confounded with Group (every pair of groups shares a "
+                        f"'{cov}' value).")
     return groups
 
 
@@ -1288,6 +1308,7 @@ def audit_normalization_check(findings, de_prov):
     d = nc.get("decision") or {}
     # AUDIT.md is delivered: a person's decision by role (normalization_check.statement), never
     # by name -- the name is in the staff-only record
+    from staff import ROLE                   # who decided, as client documents name Core staff
     chose = d.get("statement") or (f"{d.get('by')} chose {d.get('quantities')} quantities: "
                                    f"{d.get('reason')}.")
     detail = {"experiment_type": et_.get("type"), "default": (nc.get("default") or {}).get("quantities"),
@@ -1300,13 +1321,14 @@ def audit_normalization_check(findings, de_prov):
             + (f" (the data check: {'; '.join(nc.get('trips') or [])})" if nc.get("trips") else "")
             + f"; {chose}", detail,
             plain=f"No experiment type was recorded, so there was no usual normalisation to "
-                  f"compare with. {chose}")
+                  f"compare with. {chose[:1].upper() + chose[1:]}")
     elif nc.get("tripped"):
         add(findings, "normalization_check", "WARN",
             f"Experiment type {et_.get('label')} ({et_.get('source')}): the data check did not "
             f"agree with its default ({'; '.join(nc.get('trips') or [])}); {chose}", detail,
             plain=f"The usual normalisation for this kind of experiment did not fit these "
-                  f"samples, so the Core chose which quantities to use. {chose}")
+                  f"samples, so {'the Core' if d.get('by') == ROLE else 'a person'} "
+                  f"chose which quantities to use. {chose[:1].upper() + chose[1:]}")
     else:
         add(findings, "normalization_check", "PASS",
             f"Experiment type {et_.get('label')} ({et_.get('source')}): "

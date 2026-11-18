@@ -70,6 +70,15 @@ EXAMPLES = {
     "coreomics powershell": '$env:COREOMICS_TOKEN = "' + FAKE_CO + '"',
     "coreomics header, dict": "{'Authorization': 'Token " + FAKE_CO + "', 'Accept': 'application/json'}",
     "coreomics header, json": '{"Authorization": "Token ' + FAKE_CO + '"}',
+    # 2.15.1 (audit 2026-11-17, finding 11): shapes the list missed
+    "curl -u user:password": "curl -u fakeuser:" + "Sup3rS3cretPassw0rd https://x.example.org/a",
+    "curl --user": "curl --user fakeuser:" + "Sup3rS3cretPassw0rd https://x.example.org/a",
+    "sshpass -p": "sshpass -p " + "MyPassw0rd123 ssh u@h",
+    "mysql glued -p": "mysql -u root -p" + "Secret123456 db",
+    "x-api-key header": "curl -H 'X-API-Key: " + "0123456789abcdef0123456789abcdef' https://x.example.org",
+    "cookie header": "curl -H 'Cookie: .AspNetCore.Cookies=" + "CfDJ8FAKEFAKEFAKE0123456789'",
+    "generic TOKEN variable": "STAN_PG_TOKEN=" + "abcdEFGH12345678abcdEFGH python3 x.py",
+    "generic SECRET variable": "export APP_SECRET=" + "abcdEFGH12345678abcdEFGH",
 }
 # Look-alikes that must pass: file NAMES (the documented forms), placeholders, prose.
 BENIGN = [
@@ -102,6 +111,17 @@ BENIGN = [
     'headers = {"Authorization": f"Token {key}", "Accept": "application/json"}',
     '"Authorization": "Token <key>"',
     "COREOMICS_KEY=mode:600 COREOMICS_KEY_STORE=ok",
+    # 2.15.1: look-alikes of the new patterns
+    "docker run -u 1000:1000 image",
+    "sshpass is a tool for non-interactive ssh",
+    "mysql -u root -p",
+    "mysql --help shows -p for a password",
+    "the Cookie: header carries the session",
+    "X-API-Key: <key>",
+    "HIVE_KEY=$HOME/.ssh/id_ed25519",
+    "SSH_KEY=~/.ssh/id_ed25519_hive_core",
+    "APP_KEY=short",
+    "LAST_RUN_KEY=<run key>",
 ]
 
 

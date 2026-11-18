@@ -435,6 +435,7 @@ class SearchProvenanceFileTests(unittest.TestCase):
             out = os.path.join(d, "search_out")
             env = {k: v for k, v in os.environ.items() if k != "SLURM_JOB_ID"}
             env["PATH"] = bindir + os.pathsep + "/usr/bin:/bin"
+            env["HIVE_GROUP_DIR"] = d   # a fake sbatch stands for HIVE (2.15.1: cluster_is_hive)
             r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
                                 "--tools", tools, "--bundle", bundle, "--params", cfg,
                                 "--fasta", fasta, "--out", out, "--files", *raws,

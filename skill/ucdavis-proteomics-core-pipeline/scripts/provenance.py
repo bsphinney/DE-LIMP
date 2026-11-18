@@ -61,6 +61,7 @@ from fetch_fasta import (KEEP_TARGET_CONTAMINANTS_RULE, MIN_UNIQUE_PEPTIDES, sid
                          keratin_sample_recorded, enzyme_arg)
 from skill_version import skill_version, plugin_meta, label as skill_label
 from skill_version import REPOSITORY as SKILL_REPOSITORY
+from ai_agent import agent_label  # noqa: E402  the ONE name for the AI that ran the skill
 from safe_write import sha256_file, load_json  # noqa: E402  the ONE chunked sha256
 
 MANIFEST_LINES = []
@@ -949,7 +950,9 @@ def main():
             sha = sha256_file(setup["sage"])
         except OSError as e:
             sha = f"(not hashed: {type(e).__name__})"
-        if not rel:
+        if not rel or rel == "env":
+            # "env": acquire_tools.sh's word for a Sage on PATH with no package record -- a
+            # source, never a release (it once read "release venv")
             release = "unknown (no release record: tools.json names no Sage release)"
         elif rep and rep != rel:
             release = f"release v{rel} (binary self-reports {rep})"
@@ -1662,7 +1665,7 @@ make input drift visible.
 ## Skill that produced this
 - **{skill_info['title']}** — `{skill_info['name']}` {skill_label(skill_info['version'])}
 - Repository: {skill_info['repository']}
-- This analysis was run by the above Claude skill (in Claude Code / Claude Desktop).
+- This analysis was run by the above skill, driven by: {agent_label(sdir)}.
 - Installed with:
   ```
   {skill_info['install'][0]}

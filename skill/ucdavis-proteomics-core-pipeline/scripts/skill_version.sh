@@ -22,8 +22,8 @@
 #        Also 0, silently, with no HIVE login here -- unless --mode hive_remote, where the
 #        login is expected: then 5.
 #     3  ~/proteomics-pipeline on HIVE is missing, has no .claude-plugin/, is older, or is a
-#        different build (its files differ) -> run `next` (hive_exec.sh --put-skill), then
-#        check again.
+#        different build (its files differ) -> ask the user (2.15.1: never unasked), then run
+#        `next` (hive_exec.sh --put-skill) and check again.
 #     4  HIVE's copy is NEWER than this computer's -> stop and relay `say`. Never put the older
 #        one over it unasked.
 #     5  could not check (no HIVE login in hive_remote, HIVE unreachable, no plugin.json here)
@@ -111,8 +111,8 @@
 #     ask          a question for the user, or null: HIVE has a newer build and the update would
 #                  not bring this computer to it (--check-hive 4), or HIVE's copy is in use by
 #                  the user's jobs (6)
-#     next         run it at once, unasked, then --session-start again (--put-skill: the
-#                  user's own copy, --check-hive 3); after the questions when there are any
+#     next         null from 2.15.1: HIVE's copy older/different (--check-hive 3) is now the
+#                  question in `ask`, never pushed unasked (see sv_session_start)
 #     say          one line to relay, or null: the move (below), a check that could not run,
 #                  HIVE's other notes
 #     move         {"status": moved | failed | skipped, "say", "manual"} when this computer's
@@ -487,7 +487,7 @@ LIST
         say="$say It is not replaced now: $jobs of your ${JOBS_TOTAL/null/?} SLURM job(s) on HIVE use $HIVE_COPY (their batch scripts name its scripts/, or cannot be read), and their end-of-job steps would run the new scripts. Put this computer's $here there after they finish ($PUT_SKILL), or now if the user says so."
       else
         next="$PUT_SKILL"
-        say="$say Putting this computer's $here there."
+        say="$say Putting this computer's $here there needs your yes."
       fi
     fi
     # HIVE's setup.json: relayed; one written by another skill's setup.sh may be out of date
@@ -581,6 +581,20 @@ SH
 
   # The marketplace clone (the plugin catalogue `claude plugin update` reads): beside the
   # plugin cache this copy runs from, else under CLAUDE_CONFIG_DIR or ~/.claude.
+  # The commit the plugin catalogue (a git clone of main) is at, or nothing.
+  sv_catalogue_commit() {
+    command -v git >/dev/null 2>&1 || return 0
+    git -C "$1" rev-parse HEAD 2>/dev/null | head -n1 || true
+  }
+  # One line per update in $SKILL_UPDATE_LOG (default ~/.config/ucdavis-proteomics/skill_updates.log):
+  # date, version from -> to, commit from -> to, status. Never fatal.
+  sv_log_update() {
+    local f="${SKILL_UPDATE_LOG:-${SKILL_CONFIG_DIR:-$HOME/.config/ucdavis-proteomics}/skill_updates.log}"
+    mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+    printf '%s\t%s -> %s\t%s -> %s\t%s\n' "$(date -u +%Y-%m-%dT%H:%MZ)" "${1:-?}" "${2:-?}" \
+      "${3:-?}" "${4:-?}" "$5" >> "$f" 2>/dev/null || true
+  }
+
   sv_marketplace_dir() {
     if [ -n "${SKILL_MARKETPLACE_DIR:-}" ]; then printf '%s\n' "$SKILL_MARKETPLACE_DIR"; return; fi
     case "$ROOT" in
@@ -898,12 +912,13 @@ SH
 
   sv_update() {
     local here mp inst0="" inst1="" cat0 cat1 state=unknown status code say="" why="" c lc
-    local moved=false
+    local moved=false commit0="" commit1=""
     here="$(skill_version)"; [ "$here" != "$SKILL_VERSION_UNKNOWN" ] || here=""
     mp="$(sv_marketplace_dir)"
     ! sv_catalogue_moved "$mp" || moved=true
     sv_fetch_main
     cat0="$(sv_catalogue_version "$mp")"
+    commit0="$(sv_catalogue_commit "$mp")"
     REFRESH=not_needed; REFRESH_ERR=""; CLAUDE_RC=""; CLAUDE_SAID=""
     # the installed version only when this copy is not already main's (claude takes seconds)
     if [ -n "$MAIN" ] && [ -n "$here" ]; then state="$(skill_update_state "$here" "$MAIN")"; fi
@@ -976,10 +991,15 @@ SH
         fi ;;
     esac
     cat1="$(sv_catalogue_version "$mp")"
+    # FROM and TO, as commits: the catalogue is a git clone of main, so what was installed is
+    # a commit nobody could name afterwards. Appended to a log and printed in the JSON.
+    commit1="$(sv_catalogue_commit "$mp")"
+    sv_log_update "$inst0" "$inst1" "$commit0" "$commit1" "$status"
     printf '{"status": %s, "local": %s, "main": %s, "installed_before": %s, "installed": %s, ' \
       "$(sv_js "$status")" "$(sv_js "$here")" "$(sv_js "$MAIN")" "$(sv_js "$inst0")" "$(sv_js "$inst1")"
     printf '"catalogue_before": %s, "catalogue": %s, "refresh": %s, "refresh_error": %s, ' \
       "$(sv_js "$cat0")" "$(sv_js "$cat1")" "$(sv_js "$REFRESH")" "$(sv_js "$REFRESH_ERR")"
+    printf '"commit_before": %s, "commit_after": %s, ' "$(sv_js "$commit0")" "$(sv_js "$commit1")"
     printf '"moved": %s, "claude_exit": %s, "claude_said": %s, "manual": %s, "say": %s}\n' \
       "$moved" "${CLAUDE_RC:-null}" "$(sv_js "$CLAUDE_SAID")" "$(sv_js "$(sv_manual "$mp")")" "$(sv_js "$say")"
     return "$code"
@@ -1055,7 +1075,13 @@ SH
         ask_update=true
       fi
       case "$hrc" in
-        3) next="$(sv_json_field next "$h")" ;;       # the user's own copy: put it unasked
+        # HIVE's copy is older or different. It is NOT pushed unasked (2.15.1): those scripts run
+        # on HIVE under the user's account with the raw data, the CoreOmics key and the Slack
+        # webhook, and what this computer holds is whatever the plugin catalogue last pulled. The
+        # user is asked; hive_exec.sh --put-skill then records from/to on HIVE (.put_record).
+        3) if [ "$ask_update" = false ]; then
+             ask="HIVE's copy of the skill ($HIVE_COPY) is ${hv:-incomplete}; this computer has $hl. Put this computer's $hl on HIVE ($PUT_SKILL)? It replaces the scripts HIVE jobs run, so it is only done when you say yes."
+           fi ;;
         4) base=""                                    # the update brings this computer to it
            if [ "$ask_update" = false ]; then
              why=""

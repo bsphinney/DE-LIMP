@@ -784,7 +784,7 @@ methods_paragraph <- paste0(
   "that contrast's moderated t-statistics from the DE fit, converted to z-scores, with the ",
   "inter-protein correlation ", if (is.na(camera_cor)) "estimated for each set from the model's standardised residuals"
   else sprintf("preset to %g", camera_cor), tag(a_cor$given),
-  ", and fry (self-contained: are they changed at all? Giner and Smyth 2016) used the same expression values",
+  ", and fry (self-contained: are they changed at all? Giner and Smyth 2016, conference slides; implemented in limma) used the same expression values",
   if (identical(inp$method, "dpc")) ", precision weights" else "", ", design and contrast",
   " (every protein's residual effects on one canonical basis, so results do not depend on the machine)",
   if (blocked_any) sprintf(paste0(" and, for contrasts fitted with %s as a random effect, the block and its ",
@@ -831,7 +831,9 @@ methods_paragraph <- paste0(
     losses_methods()) else "")
 writeLines(c("Protein-set tests -- methods", strrep("=", 40), "", strwrap(methods_paragraph, 95), "",
              "Citations: Wu D, Smyth GK (2012) Nucleic Acids Res 40(17):e133 (camera);",
-             "           Giner G, Smyth GK (2016) F1000Research 5:2605 (fry);",
+             "           Giner G, Smyth GK (2016) FRY: a fast approximation to ROAST gene set test with mean",
+             "           aggregated set statistics. F1000Research 5:2605 (conference slides, not peer",
+             "           reviewed; doi:10.7490/f1000research.1113351.1) (fry; implemented in limma);",
              "           Ritchie ME et al. (2015) Nucleic Acids Res 43(7):e47 (limma)."),
            file.path(outdir, "sets_methods.txt"))
 

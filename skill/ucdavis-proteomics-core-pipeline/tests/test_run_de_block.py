@@ -40,6 +40,9 @@ sys.path.insert(0, SCRIPTS)
 import make_methods as mm   # noqa: E402
 
 RUN_DE = os.path.join(SCRIPTS, "run_de.R")
+# The between-run step the maxlfq blocking arms run with: the step these checks were set on
+# (2.14.2-2.15.0 auto on this fixture). Blocking, not normalisation, is under test here.
+ML_STEP = ["--between-run", "quantile"]
 BLOCK_R = os.path.join(SCRIPTS, "blocking.R")
 
 
@@ -148,15 +151,17 @@ class RunDeBlock(unittest.TestCase):
             "dpc":         ("paired", "conditions.csv", ["--method", "dpc"]),
             # paired + crossed, one within contrast: auto picks the FIXED subject effect
             "dpc_block":   ("paired", "conditions.csv", ["--method", "dpc", "--block", "Subject"]),
-            "ml":          ("paired", "conditions.csv", ["--method", "maxlfq"]),
-            "ml_block":    ("paired", "conditions.csv", ["--method", "maxlfq", "--block", "Subject"]),
+            # the blocking checks pin the between-run step, so a change of the maxlfq default
+            # (2.15.1: median_ratio) cannot loosen what they test; ML_STEP is the step they were set on
+            "ml":          ("paired", "conditions.csv", ["--method", "maxlfq"] + ML_STEP),
+            "ml_block":    ("paired", "conditions.csv", ["--method", "maxlfq", "--block", "Subject"] + ML_STEP),
             # the pairs run in batches: the fixed subject absorbs Batch
             "dpc_block_batch": ("paired", "conditions_batch.csv", ["--method", "dpc", "--block", "Subject"]),
             # ... and the random effect when asked for
             "dpc_block_random": ("paired", "conditions.csv", ["--method", "dpc", "--block", "Subject",
                                                               "--block-effect", "random"]),
             "ml_block_random": ("paired", "conditions.csv", ["--method", "maxlfq", "--block", "Subject",
-                                                             "--block-effect", "random"]),
+                                                             "--block-effect", "random"] + ML_STEP),
             # nested: a fixed subject is aliased with the age groups
             "fixed_nested": ("nested", "conditions.csv", ["--method", "dpc", "--block", "Subject",
                                                           "--block-effect", "fixed",
@@ -232,7 +237,7 @@ class RunDeBlock(unittest.TestCase):
                 s1 = significant(os.path.join(self.out(blocked), de))
                 self.assertGreater(len(s1 & TRUE_HITS), len(s0 & TRUE_HITS) + 10,
                                    f"unblocked {len(s0)}, blocked {len(s1)}")
-                # the gain is real changes, not a looser test
+                # the gain is real changes, not a looser test (maxlfq arms pinned by ML_STEP)
                 self.assertLessEqual(len(s1 - TRUE_HITS), max(2, len(s1) // 10))
 
     def test_logfc_is_the_same_estimate(self):

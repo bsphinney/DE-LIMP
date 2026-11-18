@@ -693,6 +693,12 @@ class ThermoRawCohortOnALoginNode(_FakeParserCase):
         os.chmod(os.path.join(self.sbin, "sbatch"), 0o755)
         os.environ["PATH"] = self.sbin + os.pathsep + os.environ["PATH"]
         os.environ.pop("SLURM_JOB_ID", None)             # ...and is not inside a job
+        # ...and is HIVE (2.15.1: another SLURM cluster is not given HIVE's queue, so the srun this
+        # refusal names would otherwise stop with "name your own --partition/--account")
+        self._old_group = os.environ.get("HIVE_GROUP_DIR")
+        os.environ["HIVE_GROUP_DIR"] = self.tmp
+        self.addCleanup(lambda: os.environ.pop("HIVE_GROUP_DIR", None) if self._old_group is None
+                        else os.environ.__setitem__("HIVE_GROUP_DIR", self._old_group))
 
     def cohort(self, n):
         return [self.raw(EXPLORIS, subdir=f"batch{i:03d}") for i in range(n)]

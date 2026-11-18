@@ -5,6 +5,15 @@ written up in `docs/denovo_decoy_method.html` in the skill's repository, which i
 installed plugin, so the settings that decide how the route is run, and the numbers behind each,
 are all here.
 
+> **Exploratory, not a species identification.** The result is the closest sequenced relative
+> in nr that the de novo peptides point to. It has no error control: no minimum evidence, no
+> decoy tally for the taxon. On the HeLa entrapment (true answer: human) the peptides accepted at
+> the model's nominal 1% were only 59.8% correct, and best-hit attribution put 29.5% of them in
+> primates. A species that is not in nr comes out as its nearest sequenced relative. Every output
+> says so (`status: exploratory` in `<out>_species_call.json` and in the FDR script's record).
+> Tell the user this in plain words. Do not use it for forensic or client conclusions until the
+> route is validated on samples of known species.
+
 ## The route and the five measured settings
 
 For samples where the organism is unknown or has no proteome — forensic hair,
@@ -17,8 +26,8 @@ python3 scripts/denovo_search_cmd.py --query peptides.fasta \
         --db $NR --out hits.tsv                                     # 2. emits the DIAMOND cmd
 python3 scripts/denovo_homology_fdr.py --target-hits ... --decoy-hits ... \
         --target-conf real.mztab --decoy-conf decoy.mztab \
-        --n-target N --n-decoy N --out accepted.tsv                 # 3. FDR
-python3 scripts/denovo_lca.py hits.tsv out_prefix                   # 4. species call
+        --n-target N --n-decoy N --out accepted.tsv                 # 3. confidence tier
+python3 scripts/denovo_lca.py hits.tsv out_prefix                   # 4. closest relative
 ```
 
 **Five things here are measured, and each is a way to get it silently wrong.**
@@ -39,11 +48,16 @@ python3 scripts/denovo_lca.py hits.tsv out_prefix                   # 4. species
   peptides at *lower* precision and recover *fewer* correct ones (12-feature:
   2,532 accepted / 55.5% / 1,405 correct, vs 5-feature: 2,400 / 59.8% / 1,436).
 
+**The model's cut is not an FDR on the sequences.** `--fdr` is a target-decoy level for chance
+homology (decoy spectra whose de novo peptides still hit nr). It says nothing about whether a
+de novo sequence is right: at a nominal 0.01 the accepted peptides were 59.8% correct. Never
+describe it as "1% FDR" for the peptides or the species.
+
 **Do not gate the species call on the FDR model.** Filtering lifts peptide
 precision 42.4% → 59.8% but moves primate attribution only 29.5% → 32.9%, leaves
 mammal flat, and throws away 715 correct peptides. Species error comes from
 conserved peptides matching many taxa — that is LCA's job. Run LCA over the
-unfiltered hits and report the FDR score as a confidence tier.
+unfiltered hits and report the model's score as a confidence tier.
 
 De novo sequence error is the binding error mode: 45% raw, 21% at conf ≥ 0.95,
 12% at conf ≥ 0.99. Say which threshold you used.

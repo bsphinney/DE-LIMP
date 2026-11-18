@@ -233,7 +233,8 @@ class Radiant(_Case):
 
     def test_the_de_names_radiant_fulcrum(self):
         prov = self.check("Radiant Fulcrum",
-                          ["Radiant 2.3.3 Fulcrum PG.Normalised per protein group",
+                          ["Radiant (radiant-fulcrum container 2.3.3; the Radiant version inside "
+                           "it was not recorded) Fulcrum PG.Normalised per protein group",
                            "Fulcrum's Global.PG.Q.Value"])
         self.assertIn("Just et al. 2026", prov["citation"])
         self.assertIsNone(prov.get("caveat"))
@@ -261,12 +262,15 @@ class DeclarationDetails(unittest.TestCase):
         """The adapter kept the highest precursor per protein and run: that is the peptide-level
         rollup (build_maxlfq.R's peptide branch describes it and carries its caveat), not a
         protein quantity."""
-        dec = self.rs.radiant_quantity_declaration(self.d, "Precursor.Normalised", None)
+        dec = self.rs.radiant_quantity_declaration(self.d, "Precursor.Normalised", "Q.Value")
         self.assertEqual(dec["level"], "peptide")
         self.assertEqual(dec["value"], "Radiant (version not recorded) Fulcrum "
                                        "Precursor.Normalised precursor intensity")
-        self.assertEqual(dec["q_columns"], "placeholder")
-        self.assertIn("0.0 placeholders", dec["identification"])
+        self.assertEqual(dec["q_columns"], "real")
+        self.assertIn("not a protein-level FDR", dec["identification"])
+        # 2.15.1 (audit 2026-11-17, lane 1 #7): no q-value column is refused, never 0.0
+        with self.assertRaises(ValueError):
+            self.rs.radiant_quantity_declaration(self.d, "Precursor.Normalised", None)
         dec = self.rs.radiant_quantity_declaration(self.d, "PG.Quantity", "Global.PG.Q.Value")
         self.assertEqual((dec["level"], dec["q_columns"]), ("protein", "real"))
 
@@ -314,8 +318,10 @@ class DeclarationDetails(unittest.TestCase):
 
     def test_main_s_engine_version_is_used_when_the_output_has_none(self):
         self.rs.ENGINE_VERSION = "2.3.3"
-        self.assertIn("Radiant 2.3.3", self.rs.radiant_quantity_declaration(
-            self.d, "PG.Quantity", "Q.Value")["value"])
+        # 2.15.1 follow-up: the tag is the container's, never printed as Radiant's own version
+        v = self.rs.radiant_quantity_declaration(self.d, "PG.Quantity", "Q.Value")["value"]
+        self.assertIn("radiant-fulcrum container 2.3.3", v)
+        self.assertNotIn("Radiant 2.3.3", v)
 
     def test_frozen_config_without_pyyaml(self):
         with open(os.path.join(self.d, "frozen_config.yaml"), "w") as fh:

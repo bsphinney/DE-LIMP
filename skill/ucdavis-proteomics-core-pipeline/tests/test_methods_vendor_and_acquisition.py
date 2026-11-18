@@ -42,7 +42,8 @@ def touch(path):
     return path
 
 
-def methods(tmp, raw, instrument=None, acquisition=None, workflow_manifest=None, out=None):
+def methods(tmp, raw, instrument=None, acquisition=None, workflow_manifest=None, out=None,
+            extra=()):
     """make_methods.py end to end; returns (methods.md text, methods_params.json)."""
     out = out or os.path.join(tmp, "methods.md")
     cmd = [PY, os.path.join(SCRIPTS, "make_methods.py"), "--raw", *raw, "--out", out]
@@ -50,6 +51,7 @@ def methods(tmp, raw, instrument=None, acquisition=None, workflow_manifest=None,
         cmd += ["--instrument", instrument]
     if acquisition:
         cmd += ["--acquisition", acquisition]
+    cmd += list(extra)
     if workflow_manifest is not None:
         wf = os.path.join(tmp, "workflow.manifest.json")
         with open(wf, "w", encoding="utf-8") as fh:
@@ -137,7 +139,7 @@ class Vendor(unittest.TestCase):
 
     def test_core_timstof_d_keeps_the_facility_defaults(self):          # (pin)
         d = make_timstof_d(os.path.join(self.tmp, "data", "r1.d"))
-        md, params = methods(self.tmp, [d])
+        md, params = methods(self.tmp, [d], extra=["--acquired-at-core"])     # 2.15.1 review
         self.assertIn(f"{mm.LC_COLUMN_DEFAULT} {mm.DEF}", section(md, "Liquid chromatography"))
         self.assertIn(f"{mm.EMITTER_DEFAULT} {mm.DEF}", section(md, "Mass spectrometry"))
         self.assertIn("not recorded in the .d", md)
@@ -145,8 +147,12 @@ class Vendor(unittest.TestCase):
     def test_core_timstof_from_the_record_keeps_the_facility_defaults(self):   # (pin)
         d = os.path.join(self.tmp, "data", "r1.d")
         os.makedirs(d)
-        md, _ = methods(self.tmp, [d], instrument="timsTOF HT")
+        md, _ = methods(self.tmp, [d], instrument="timsTOF HT", extra=["--acquired-at-core"])
         self.assertIn(f"{mm.LC_COLUMN_DEFAULT} {mm.DEF}", section(md, "Liquid chromatography"))
+        # the same .d with no Core record: tagged blanks (2.15.1 review minor 11)
+        md, _ = methods(self.tmp, [d], instrument="timsTOF HT")
+        self.assertNotIn(mm.LC_COLUMN_DEFAULT, md)
+        self.assertIn("TIMS", section(md, "Mass spectrometry"))
         self.assertIn("TIMS", section(md, "Mass spectrometry"))
 
 
@@ -169,28 +175,51 @@ class TimsTofOutsideData(unittest.TestCase):
         self.assertIn("operated in DIA mode", ms)
         self.assertNotIn(f"operated in ____ {mm.NR_TAG} mode", ms)
 
-    def test_outside_data_tags_the_core_acknowledgment(self):
+    def test_outside_data_gets_no_core_acknowledgment(self):
         md, _ = methods(self.tmp, [self.mzml], instrument="timsTOF Pro 2")
         ack = section(md, "Acknowledgments")
-        self.assertIn("Howard Hughes Medical Institute", ack)          # kept, but tagged
+        self.assertNotIn("Howard Hughes Medical Institute", ack)
+        self.assertIn("not acquired at the UC Davis Proteomics Core", ack)
+
+    def test_core_mzml_keeps_the_sentence_with_the_confirm_tag(self):
+        md, _ = methods(self.tmp, [self.mzml], instrument="timsTOF Pro 2",
+                        extra=["--acquired-at-core"])
+        ack = section(md, "Acknowledgments")
+        self.assertIn("Howard Hughes Medical Institute", ack)
         self.assertIn(mm.ACK_OUTSIDE_TAG, ack)
 
-    def test_an_outside_thermo_mzml_is_tagged_too(self):
+    def test_an_outside_thermo_mzml_gets_the_blank_too(self):
         md, _ = methods(self.tmp, [self.mzml], instrument="Orbitrap Exploris 480")
         ack = section(md, "Acknowledgments")
-        self.assertIn("S10OD026918-01A1", ack)
-        self.assertIn(mm.ACK_OUTSIDE_TAG, ack)
+        self.assertNotIn("S10OD026918-01A1", ack)
+        self.assertIn("add your own facility's", ack)
 
-    def test_a_core_raw_is_not_tagged(self):                             # (pin)
+    def test_an_exploris_raw_with_no_core_record_gets_the_blank(self):
         raw = touch(os.path.join(self.tmp, "data", "s1.raw"))
         md, _ = methods(self.tmp, [raw], instrument="Orbitrap Exploris 480")
+        ack = section(md, "Acknowledgments")
+        self.assertNotIn("S10OD", ack)
+        self.assertIn("add your own facility's", ack)
+
+    def test_a_core_raw_is_untagged_when_the_core_acquired_it(self):
+        raw = touch(os.path.join(self.tmp, "data", "s1.raw"))
+        md, _ = methods(self.tmp, [raw], instrument="Orbitrap Exploris 480",
+                        extra=["--acquired-at-core"])
         ack = section(md, "Acknowledgments")
         self.assertIn("S10OD026918-01A1", ack)
         self.assertNotIn(mm.ACK_OUTSIDE_TAG, ack)
 
-    def test_a_core_timstof_d_is_not_tagged(self):                       # (pin)
-        md, _ = methods(self.tmp, [make_timstof_d(os.path.join(self.tmp, "data", "r1.d"))])
-        self.assertNotIn(mm.ACK_OUTSIDE_TAG, section(md, "Acknowledgments"))
+    def test_a_core_timstof_d_gets_the_blank_without_a_core_record(self):
+        d = make_timstof_d(os.path.join(self.tmp, "data", "r1.d"))
+        md, _ = methods(self.tmp, [d])
+        self.assertNotIn("Howard Hughes", section(md, "Acknowledgments"))
+
+    def test_a_core_timstof_d_is_not_tagged_when_the_core_acquired_it(self):
+        d = make_timstof_d(os.path.join(self.tmp, "data", "r1.d"))
+        md, _ = methods(self.tmp, [d], extra=["--acquired-at-core"])
+        ack = section(md, "Acknowledgments")
+        self.assertIn("Howard Hughes", ack)
+        self.assertNotIn(mm.ACK_OUTSIDE_TAG, ack)
 
 
 class Acquisition(unittest.TestCase):

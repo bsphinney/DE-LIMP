@@ -151,6 +151,21 @@ class EstimateParamsTests(unittest.TestCase):
         self.assertIn("15,000", src)
         self.assertIn("120,000", src)
 
+    def test_interpolation_runs_between_neighbouring_tiers(self):
+        """Audit 2026-11-17, lane 1 #10: the line ran through the two END tiers only, so it
+        missed the documented 60k and 120k values -- 110k gave 6.6 ppm, tighter than the 7
+        documented at 120k. Every value now lies between its neighbouring tiers'."""
+        tiers = sorted(ep.DIANN_ORBITRAP_PPM.items())
+        for (r1, p1), (r2, p2) in zip(tiers, tiers[1:]):
+            for res in (r1 + (r2 - r1) // 4, (r1 + r2) // 2, r2 - (r2 - r1) // 4):
+                ppm, src = ep.ppm_for_resolution(res)
+                self.assertTrue(p2 <= ppm <= p1, (res, ppm, p1, p2))
+                self.assertIn("interpolated", src)
+        self.assertEqual(ep.ppm_for_resolution(110000)[0], 7.3)
+        self.assertEqual(ep.ppm_for_resolution(90000)[0], 8.1)
+        self.assertEqual(ep.ppm_for_resolution(45000)[0], 11.8)
+        self.assertEqual(ep.ppm_for_resolution(180000)[0], 5.0)
+
     def test_ppm_for_resolution_does_not_extrapolate_outside_the_table(self):
         for res in (15000, 7500, 480000):
             ppm, src = ep.ppm_for_resolution(res)
@@ -237,7 +252,7 @@ class EstimateParamsTests(unittest.TestCase):
                  ((15000, 120000), {"--mass-acc-ms1": 9},
                   {"--mass-acc": "7", "--mass-acc-ms1": "9"}),
                  ((90000, 15000), {"--mass-acc": 8},
-                  {"--mass-acc": "8", "--mass-acc-ms1": "7.5"}),
+                  {"--mass-acc": "8", "--mass-acc-ms1": "8.1"}),
                  ((120000, 60000), {"--mass-acc": 8}, {"--mass-acc": "8", "--mass-acc-ms1": "7"}))
         for (r1, r2), ov, want in cases:
             with self.subTest(res=(r1, r2), overrides=ov), tempfile.TemporaryDirectory() as d:
@@ -516,26 +531,26 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(s["measure"], ["mass-acc"])
 
     def test_an_interpolated_level_is_not_called_documented(self):
-        """MS1 at 90k is between tiers, so its 7.5 ppm is interpolated from DIA-NN's table -- not a
+        """MS1 at 90k is between tiers, so its 8.1 ppm (7.5 before 2.15.1) is interpolated from DIA-NN's table -- not a
         README value. The gate's reason and the chain's provenance said '--mass-acc-ms1 7.5 as
         documented'; only the level's own rationale entry said 'interpolated'."""
         with tempfile.TemporaryDirectory() as d:
             cfg, side = estimate(d, "Orbitrap Exploris 480", 90000, 15000)
-            self.assertEqual(side["mass_accuracy_documented"], {"--mass-acc-ms1": 7.5})
+            self.assertEqual(side["mass_accuracy_documented"], {"--mass-acc-ms1": 8.1})
             self.assertIn("interpolated for 90,000",
                           side["rationale"]["mass_accuracy_documented"]["source"])
             cfg120, side120 = estimate(d, "Orbitrap Exploris 480", 120000, 15000, name="t.cfg")
             self.assertNotIn("interpolated", side120["rationale"]["mass_accuracy_documented"]
                              ["source"], "an exact 120k tier was described as interpolated")
             safe = dp.parallel_safe(cfg)
-            self.assertIn("7.5", safe["reason"])
+            self.assertIn("8.1", safe["reason"])
             self.assertNotIn("as documented", safe["reason"])
             self.assertIn("interpolated", safe["reason"])
             raws, fasta = _inputs(d)
             p = _generate(d, cfg, raws, fasta)
             self.assertEqual(p.returncode, 0, p.stderr)
             src = json.loads(p.stdout)["mass_acc"]["source"]
-            self.assertIn("7.5", src)
+            self.assertIn("8.1", src)
             self.assertNotIn("as documented", src)
             self.assertIn("interpolated", src)
 
@@ -596,6 +611,7 @@ class RoutingTests(unittest.TestCase):
                 json.dump({"acquisition": "DIA"}, fh)
             env = {k: v for k, v in os.environ.items() if k != "SLURM_JOB_ID"}
             env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+            env["HIVE_GROUP_DIR"] = d   # a fake sbatch stands for HIVE (2.15.1: cluster_is_hive)
             out = os.path.join(d, "out")
             p = subprocess.run([sys.executable, os.path.join(SCRIPTS, "run_search.py"),
                                 "--tools", tools, "--bundle", bundle, "--params", cfg,
@@ -628,7 +644,7 @@ class ChangelogTests(unittest.TestCase):
         text = open(self.PATH).read()
         self.assertIn("BREAKING", text)
         # The entry that shipped it (Skill 2.5.0), not whichever entry is newest.
-        start = text.index("Orbitrap mass accuracy")
+        start = text.index("## [Skill 2.5.0]")
         head = text[start:text.index("\n## ", start)]
         self.assertIn("param_overrides", head)
         self.assertIn("--mass-acc", head)

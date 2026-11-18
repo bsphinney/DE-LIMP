@@ -1065,6 +1065,64 @@ def main():
                   "hit, never a 'tested' protein: count tested proteins per comparison as the rows "
                   "with a P.Value (`de_provenance.json` de_tables n_tested).")
     w("")
+    onoff = prov.get("onoff") if isinstance(prov.get("onoff"), dict) else None
+    if onoff:
+        w("## On/off proteins — seen in one group only")
+        if onoff.get("status") == "failed":
+            w(f"- `{onoff.get('file') or 'OnOff_Proteins.csv'}` could NOT be written "
+              f"({onoff.get('reason') or 'no reason recorded'}). Proteins seen in one group only have "
+              "no fold change and are missing from the DE tables: say so in Data Quality Notes.")
+        else:
+            w(f"- `{onoff.get('file') or 'OnOff_Proteins.csv'}` lists them, from the pipeline's own "
+              f"rule: {onoff.get('rule') or 'not recorded'} (minimum "
+              f"{onoff.get('n_min_unit') or 'run'}s: {onoff.get('n_min', 'not recorded')}.)")
+            for c, t in (onoff.get("contrasts") or {}).items():
+                if isinstance(t, dict):
+                    w(f"  - {contrast_label(c)}: {t.get('n_onoff', 'not recorded')} on/off "
+                      f"({t.get('n_only_group_1', '?')} only in {t.get('group_1')}, "
+                      f"{t.get('n_only_group_2', '?')} only in {t.get('group_2')}; "
+                      f"{t.get('n_dropped_by_coverage_filter', '?')} of them below the coverage "
+                      f"filter, so absent from the DE tables altogether)")
+            if onoff.get("skipped"):
+                w("  - Not assessed (not a simple two-group comparison): "
+                  + ", ".join(contrast_label(c) for c in onoff["skipped"]) + ".")
+            w("- Report them in their own short list per comparison, by gene name, as **detection "
+              "patterns (present in one condition, absent in the other)**. Never give them a fold "
+              "change, a p-value or a place on the volcano, and never count them as tested or "
+              "significant proteins. Read the file for the names; do not invent any.")
+        w("")
+    inc = prov.get("incomplete_data") if isinstance(prov.get("incomplete_data"), dict) else None
+    if inc:
+        w("## Calls on incomplete data — the per-call warning flag")
+        w(f"- The DE tables carry `values_per_group`, `called_on_incomplete_data` and `incomplete_tier`: "
+          f"{inc.get('rule') or 'not recorded'}")
+        for c, t in (prov.get("de_tables") or {}).items():
+            if isinstance(t, dict) and isinstance(t.get("n_called_incomplete"), int):
+                w(f"  - {contrast_label(c)}: {t['n_called_incomplete']} of {t.get('n_significant')} significant "
+                  f"calls on incomplete data ({t.get('n_called_single_sample', '?')} from a protein measured "
+                  "in only one run of a group)")
+        w(f"- {inc.get('benchmark_text') or 'benchmark not recorded'}")
+        w("- In Key Findings, name which top hits are flagged and treat them as leads to confirm, not as "
+          "findings on a par with calls measured in every run. Never describe the flag as a p-value or an "
+          "effect size, and never drop a flagged protein silently.")
+        w("")
+    qt = prov.get("quantums_tradeoff") if isinstance(prov.get("quantums_tradeoff"), dict) else None
+    if qt:
+        w("## QuantUMS cutoff trade-off")
+        if qt.get("status") != "written":
+            w(f"- Not made ({qt.get('status')}): {qt.get('reason') or 'no reason recorded'}. Say so only if "
+              "asked about QuantUMS cutoffs; do not describe a trade-off that was not computed.")
+        else:
+            u = qt.get("used") or {}
+            w(f"- `{qt.get('file')}` re-fits the DE at five QuantUMS cutoffs. This analysis used "
+              f"PG.MaxLFQ.Quality >= {u.get('pgQ')}, Empirical.Quality >= {u.get('eQ')} "
+              f"({qt.get('cutoff_source')}). {(qt.get('recommended') or {}).get('label')} is marked "
+              f"{(qt.get('recommended') or {}).get('tag')}: {(qt.get('recommended') or {}).get('citation')}.")
+            w("- Report the trade-off in Data Quality Notes in a sentence or two (proteins and calls "
+              "gained or lost, calls on incomplete data). The cutoff is the client's choice: do not "
+              "recommend changing it unless the table shows a large cost, and say the default was not "
+              "confirmed when it is tagged DEFAULT.")
+        w("")
     if pulldown:
         w("## Pull-down design — enrichment over a control")
         w(f"Control group(s), by name: {', '.join(controls)}. Contrasts against them "
