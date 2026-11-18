@@ -8,9 +8,11 @@ wrong; the default limpa route got 2%. Now ONE rule, build_maxlfq.R maxlfq_betwe
 the step (run_de.R --between-run auto|none|quantile|median, default auto):
 
   * DIA-NN report, PG.MaxLFQ normalised by DIA-NN          -> none (no second step)
-  * DIA-NN report searched with --no-norm                   -> quantile (the only normalisation)
+  * DIA-NN report searched with --no-norm                   -> median_ratio (2.15.1; quantile up
+    to 2.15.0: on real --no-norm PXD063416 data quantile gave 46-72% wrong calls at 4-10 m/z)
   * DIA-NN report, whether DIA-NN normalised NOT RECORDED   -> none, said "[confirm]"
-  * a report that declares its own quantity (Sage, FragPipe) -> quantile, as in 2.14.1
+  * a report that declares its own quantity (Sage, FragPipe) -> none when the engine normalised,
+    else median_ratio (2.15.1, audit L2-3; quantile up to 2.15.0) -- test_engine_quantities_2151
   * --quantities raw                                        -> none; any other step is refused
   * --between-run quantile | median | none                  -> as given, said "chosen for this DE"
 
@@ -177,15 +179,34 @@ class TheRule(unittest.TestCase):
                       "(limma::normalizeBetweenArrays)", desc["normalisation"])
         self.assertIn("chosen for this DE", desc["normalisation"])
 
-    def test_a_no_norm_report_keeps_its_quantile_step(self):
+    def test_a_no_norm_report_gets_the_median_ratio_step(self):           # 2.15.1, HIVE F1
+        """Quantities no engine normalised get the same step whichever engine made them: a
+        --no-norm DIA-NN report's PG.MaxLFQ is median_ratio-centred, as Sage's LFQ is (quantile
+        up to 2.15.0). Each run's offset is removed, and the record says why."""
+        report, _, pg = write_report(os.path.join(self.d, "nn"), normalised=False)
+        E, desc = run_maxlfq(report, os.path.join(self.d, "o"))
+        self.assertEqual(desc["between_run"]["method"], "median_ratio")
+        self.assertEqual(desc["between_run"]["requested"], "auto")
+        self.assertNotIn("engine_normalised", desc["between_run"])
+        self.assertIn("the search ran with --no-norm", desc["between_run"]["why"])
+        self.assertIn("quantile up to 2.15.0", desc["between_run"]["why"])
+        self.assertTrue(desc["normalisation"].startswith(
+            "median-ratio centring (each run shifted by its median log2 ratio"), desc["normalisation"])
+        self.assertIn("only: the DIA-NN search ran with --no-norm", desc["normalisation"])
+        self.assertNotIn("quantile normalisation", desc["normalisation"])
+        # location only: every run's values moved by one constant (its factor)
+        for run, _ in RUNS:
+            shifts = {round(E[a][r] - math.log2(v), 9) for (a, r), v in pg.items() if r == run}
+            self.assertEqual(len(shifts), 1, run)
+
+    def test_explicit_quantile_on_a_no_norm_report_is_still_available(self):
         report, _, _ = write_report(os.path.join(self.d, "nn"), normalised=False)
-        _, desc = run_maxlfq(report, os.path.join(self.d, "o"))
+        _, desc = run_maxlfq(report, os.path.join(self.d, "o"), between_run="quantile")
         self.assertEqual(desc["between_run"]["method"], "quantile")
-        self.assertEqual(desc["between_run"]["why"],
-                         "the only between-run normalisation: the search ran with --no-norm")
         self.assertTrue(desc["normalisation"].startswith(
             "quantile normalisation (limma::normalizeBetweenArrays) only: the DIA-NN search ran "
-            "with --no-norm"))
+            "with --no-norm"), desc["normalisation"])
+        self.assertIn("chosen for this DE", desc["normalisation"])
 
     def test_not_recorded_gets_no_step_and_says_confirm(self):
         report, _, _ = write_report(os.path.join(self.d, "u"), quant_columns=False)
@@ -195,14 +216,17 @@ class TheRule(unittest.TestCase):
         self.assertIn("no second step", desc["normalisation"])
         self.assertIn("NOT RECORDED [confirm]", desc["normalisation"])
 
-    def test_declared_sage_quantities_keep_quantile(self):            # unchanged until measured
+    def test_declared_sage_quantities_get_a_location_only_step(self):     # 2.15.1, audit L2-3
+        """Sage's LFQ is not normalised across runs: auto gives the median-ratio step, not
+        quantile (2.15.0 quantile-normalised every declared quantity)."""
         report, _, _ = write_report(os.path.join(self.d, "s"), declared=SAGE_META)
         _, desc = run_maxlfq(report, os.path.join(self.d, "o"))
-        self.assertEqual(desc["pipeline_id"], "peptide_max")
-        self.assertEqual(desc["between_run"]["method"], "quantile")
-        self.assertEqual(desc["normalisation"],
-                         "quantile normalisation (limma::normalizeBetweenArrays) of the engine's "
-                         "quantities")
+        self.assertEqual(desc["pipeline_id"], "peptide_medpolish")
+        self.assertEqual(desc["between_run"]["method"], "median_ratio")
+        self.assertIs(desc["between_run"]["engine_normalised"]["value"], False)
+        self.assertTrue(desc["normalisation"].startswith("median-ratio centring"),
+                        desc["normalisation"])
+        self.assertIn("of the engine's quantities", desc["normalisation"])
 
     def test_median_centres_columns(self):
         report, _, pg = write_report(os.path.join(self.d, "nn"), normalised=False)
@@ -272,7 +296,7 @@ class RunDe(unittest.TestCase):
         report, cond, _ = write_report(os.path.join(self.d, "n"))
         p, _ = self.de(report, cond, "--method", "maxlfq", "--between-run", "loess")
         self.assertNotEqual(p.returncode, 0)
-        self.assertIn("auto, none, quantile or median", " ".join(p.stderr.split()))
+        self.assertIn("auto, none, quantile, median or median_ratio", " ".join(p.stderr.split()))
 
     def test_the_default_records_no_second_step_everywhere(self):
         report, cond, _ = write_report(os.path.join(self.d, "n"))

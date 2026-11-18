@@ -21,10 +21,12 @@ standard column, tagged. It writes:
   methods_params.json the extracted parameters, machine-readable
 
 Then to_docx.py can render methods.md to Word. The agent should verify the draft
-against the extracted params and polish the prose (keep the acknowledgment exact).
+against the extracted params and polish the prose (leave the grant numbers as printed).
 
-Acknowledgments are from https://proteomics.ucdavis.edu/instrument-grant-acknowledgments
-(verified 2026-06). Confirm exact wording there before publishing.
+The grant numbers are those listed on https://proteomics.ucdavis.edu/instrument-grant-acknowledgments
+(checked 2026-06); the page lists numbers, not sentences, so the sentence wording is this skill's
+own. Confirm the current wording there before publishing. The Core's acknowledgment is printed
+only for data the run's record shows the Core acquired; otherwise a tagged blank.
 
 Usage:
   python3 make_methods.py --raw '/data/*.d' --out methods.md \
@@ -52,7 +54,8 @@ from fetch_fasta import CONT_TAG, keratin_sample_recorded, FEW_ADDED_SEQUENCES  
 
 ACK_SOURCE = "https://proteomics.ucdavis.edu/instrument-grant-acknowledgments"
 # (instrument-name substrings, facility filename prefixes, label, acknowledgment).
-# Verified against the UC Davis Proteomics Core grant-acknowledgment page (2026-06). The page
+# Grant numbers as listed on the UC Davis Proteomics Core grant-acknowledgment page (2026-06);
+# the sentences around them are this skill's own wording, not the page's. The page
 # names only the timsTOF Pro 2 for the HHMI acknowledgment; Brett confirmed on 2026-09-25 that it
 # covers the timsTOF HT too, so every timsTOF gets it.
 # The filename prefixes are the facility's Thermo naming (FL*.raw, Ex*.raw) and are only a
@@ -82,9 +85,14 @@ VENDOR_WORDS = {
 }
 VENDOR_NAME = {"Bruker": "Bruker Daltonics", "Thermo": "Thermo Fisher Scientific"}
 VENDOR_TAG = "[vendor — confirm]"
-# Outside data (an mzML, an instrument the Core does not have) whose instrument name is in the
-# Core's registry: the acknowledgment would say the Core ran it, which nothing here shows.
+# Data whose acquisition at the Core is not on record (an mzML, an instrument the Core does not
+# have, or a .d/.raw from a user who is not the Core's client): the acknowledgment would say the
+# Core ran it, which nothing here shows. Printed in place of the Core's sentence (2.15.1).
 ACK_OUTSIDE_TAG = "[acquired at the UC Davis Proteomics Core? — confirm]"
+ACK_NOT_CORE_BLANK = (
+    "____ [not acquired at the UC Davis Proteomics Core, or not recorded as such — add your own "
+    "facility's instrument acknowledgment here. If the Core did acquire these data, re-run with "
+    "--acquired-at-core, or attach the CoreOmics submission to the session]")
 # The instrument when it comes from the session's record rather than the raw file.
 REC_SRC = "session record (workflow manifest) — not read from the raw file"
 
@@ -317,9 +325,10 @@ def lc_paragraph(rep, col, is_bruker, lc_known, facility=True):
     """The Liquid chromatography paragraph: LC system and method as the .d recorded them,
     the column from column_record(), and tagged placeholders for what no file records.
     `is_bruker`: a Core timsTOF .d, whose CaptiveSpray emitter and column temperature are the
-    facility's (tagged) defaults. `facility`: a run on a Core instrument (.d or .raw); for data
-    from elsewhere (an mzML, an instrument the Core does not have) no Core LC default is
-    printed, only tagged blanks (2.14.2, I09)."""
+    facility's (tagged) defaults. `facility`: a run on a Core instrument (.d or .raw) that the
+    record shows the Core acquired (make_methods main: facility_lc); for data from elsewhere (an
+    mzML, an instrument the Core does not have, data not recorded as the Core's) no Core LC
+    default is printed, only tagged blanks (2.14.2, I09; 2.15.1 review)."""
     column = (f"an analytical column {NOT_RECORDED}" if col.get("tag") == NR_TAG else
               _with_tag(f"a {col['text']}", col.get("tag")))
     phases = ("Mobile phase A was 0.1% (v/v) formic acid in water and mobile phase B 0.1% "
@@ -353,7 +362,7 @@ def lc_paragraph(rep, col, is_bruker, lc_known, facility=True):
          f"{rep.get('instrument') or NOT_RECORDED} mass spectrometer (Bruker Daltonics)"
     s += (f" via a {_source_name(rep['source_type'])} ion source."
           if rep.get("source_type") and is_bruker else ".")
-    temp = f"{COLUMN_TEMP_DEFAULT} {DEF}" if is_bruker else f"____ °C {NR_TAG}"
+    temp = f"{COLUMN_TEMP_DEFAULT} {DEF}" if (is_bruker and facility) else f"____ °C {NR_TAG}"
     s += f" Peptides were separated on {column}, at a column temperature of {temp},"
     spd = re.search(r"(\d+)\s*samples?\s*per\s*day", meth or "", re.I)
     s += (f" with the {meth} ({spd.group(1)} SPD) method{run}." if spd else
@@ -365,7 +374,7 @@ def lc_paragraph(rep, col, is_bruker, lc_known, facility=True):
     return s + " " + phases
 
 
-def ms_paragraph(rep, v, coupled=False):
+def ms_paragraph(rep, v, coupled=False, core=True):
     """The Mass spectrometry paragraph for a timsTOF run, in the order published dia-PASEF
     Methods report it (literature survey, 2026-09-24): acquisition mode and scan range, TIMS,
     window scheme, cycle time, collision energy, then source settings and software. `coupled`:
@@ -455,8 +464,9 @@ def ms_paragraph(rep, v, coupled=False):
                                    ("dry_temp", "a dry temperature of")) if rep.get(key)]
         joined = (", ".join(bits[:-1]) + " and " + bits[-1]) if len(bits) > 1 else \
             (bits[0] if bits else "")
+        # the Core's emitter only for data the Core acquired (`core`); else a tagged blank
         out.append(f"The {_source_name(rep['source_type'])} source was fitted with "
-                   f"{EMITTER_DEFAULT} {DEF}"
+                   + (f"{EMITTER_DEFAULT} {DEF}" if core else f"an emitter ____ {NR_TAG}")
                    + (f" and operated at {joined}" if joined else "") + ".")
     ctrl = rep.get("ms_control") or rep.get("control_software")
     if ctrl or rep.get("acquisition_software_version"):
@@ -591,6 +601,30 @@ def instrument_from_records(a, sess_paths=None):
     if len(names) == 1:
         return names.pop(), f"workflow manifest ({os.path.basename(wf)}): step 2 detection"
     return None, None
+
+
+def core_acquisition_recorded(a):
+    """Why the run's own record says the Core acquired the data (a str), or None: --acquired-at-core
+    (the user said so: SKILL.md 9d asks when no session records it), or
+    submission_report.core_acquisition() -- THE one test: a CoreOmics submission attached or
+    announced (init --submission), Core staff's client-work mark, or the Core's internal work
+    (init --internal) -- on --session or --submission, or a --submission record from CoreOmics.
+    Fails closed."""
+    if getattr(a, "acquired_at_core", False):
+        return "--acquired-at-core (the user confirmed the Core acquired these data)"
+    try:
+        import submission_report
+        for src in (getattr(a, "session", None), getattr(a, "submission", None)):
+            why = src and submission_report.core_acquisition(src)
+            if why:
+                return why
+        if getattr(a, "submission", None):
+            rec, _s = submission_report.resolve(a.submission)
+            if rec and rec.get("source") == submission_report.SOURCE_COREOMICS:
+                return f"CoreOmics submission record ({a.submission})"
+    except Exception:                      # noqa: BLE001 -- unreadable record: not recorded
+        return None
+    return None
 
 
 def pick_ack(instrument, files):
@@ -1106,6 +1140,34 @@ def tag_defaults(rec, side, preset=None):
                 t["default"] = DEF_INNER
 
 
+def route_status_record(engine, params_files):
+    """How mature the search route is, as its preset record says (make_presets.py
+    <config>.provenance.json `route_status`: Radiant is "experimental", 2.15.1) -> that dict, or
+    None. A Radiant search whose preset record is not found here (a session from before 2.15.1,
+    a copied folder) still gets the route's status, from its one definition
+    (make_presets.RADIANT_ROUTE_STATUS), with `source` saying so."""
+    for cand in params_files:
+        side = _load_json(f"{cand}.provenance.json") if cand else None
+        if isinstance(side, dict) and isinstance(side.get("route_status"), dict):
+            return dict(side["route_status"], source=f"{os.path.basename(cand)}.provenance.json")
+    if engine == "radiant":
+        from make_presets import RADIANT_ROUTE_STATUS
+        return dict(RADIANT_ROUTE_STATUS, source="the skill's Radiant route (no preset record "
+                                                 "found for this search)")
+    return None
+
+
+def route_status_sentence(rec):
+    """The Methods sentence for a search route that is not yet a route of record (Radiant:
+    experimental), from route_status_record; "" for any other route."""
+    rs = (rec or {}).get("route_status")
+    if not isinstance(rs, dict) or not rs.get("status"):
+        return ""
+    why = "; ".join(str(r) for r in rs.get("reasons") or [])
+    return (f"This search route is {rs['status']}" + (f" ({why})" if why else "") + ". "
+            + (str(rs.get("say")).rstrip(".") + "." if rs.get("say") else ""))
+
+
 def search_record(params=None, search_prov=None, manifest=None):
     """What the database search ran with, each value with where it came from.
 
@@ -1162,6 +1224,11 @@ def search_record(params=None, search_prov=None, manifest=None):
     if prov.get("version"):
         rec["version"] = str(prov["version"])
         rec["version_source"] = "search_provenance.json (the version that ran)"
+        # a container tag is not the engine's version: say which it is (audit lane 3 #6), by the
+        # one rule (resolve_defaults.engine_version_text: the report, Slack and README too)
+        from resolve_defaults import engine_version_text
+        rec["version"] = engine_version_text(engine, prov["version"], prov.get("engine_version"),
+                                             rec["engine_label"])
     elif prov.get("engine"):
         # a record whose version is null (run_search.engine_version_record: every conda-env
         # Sage): not recorded -- the manifest's pin is a request, never what ran (T44 F4;
@@ -1169,7 +1236,9 @@ def search_record(params=None, search_prov=None, manifest=None):
         rec["version_source"] = ("search_provenance.json names no version (the engine did not "
                                  "report one)")
     elif (wf.get("engine") or {}).get("version"):
-        rec["version"] = f"{wf['engine']['version']} [pinned version — confirm it is what ran]"
+        from resolve_defaults import engine_version_text
+        rec["version"] = (f"{engine_version_text(engine, wf['engine']['version'], pinned=True)} "
+                          "[pinned version — confirm it is what ran]")
         rec["version_source"] = ("workflow.manifest.json pin; the run's own record "
                                  "(search_provenance.json) was not found")
 
@@ -1197,6 +1266,7 @@ def search_record(params=None, search_prov=None, manifest=None):
             rec["params_file"], rec["params_source"] = path, src
             break
     pf = rec["params_file"]
+    rec["route_status"] = route_status_record(engine, [c for c, _ in cands])
     if not pf:
         rec["warnings"].append("no search parameters file could be found from here")
         return rec
@@ -1682,6 +1752,29 @@ def fragpipe_citations(rec):
     return [CITE[k] for k in keys if k in CITE]
 
 
+# DIA-NN's paper (Crossref- and PubMed-checked in the 2.15.1 audit); the other engines' papers are
+# run_search.CITE's, the one table (rule 3)
+DIANN_CITE = ("DIA-NN (Demichev et al. 2020, Nat Methods 17:41-44) "
+              "[10.1038/s41592-019-0638-x]")
+ENGINE_CITE_KEYS = {"sage": "sage", "radiant": "radiant", "alphadia": "alphadia"}
+
+
+def engine_citations(rec):
+    """The papers for the software the search record says ran, for EVERY engine (before 2.15.1
+    only FragPipe's steps were cited): FragPipe's per-step papers, DIA-NN's, or the engine's own
+    CITE entry. [] when the record names no engine."""
+    eng = (rec or {}).get("engine")
+    if eng == "fragpipe":
+        return fragpipe_citations(rec)
+    if eng == "diann":
+        return [DIANN_CITE]
+    key = ENGINE_CITE_KEYS.get(eng)
+    if key:
+        from run_search import CITE
+        return [CITE[key]]
+    return []
+
+
 def fragpipe_tolerance_sentence(rec):
     """Where the tolerances came from when the skill's preset adapted FragPipe's own setting for
     the instrument (make_presets.py tolerances.mode: ion trap, unit resolution); "" otherwise."""
@@ -1758,6 +1851,8 @@ def search_paragraph(rec, de_prov=None):
     s[0] += ", with match-between-runs." if mbr is True and not (first_pass or dda_fp) else "."
     if rec.get("selection_sentence"):                  # how the engine was chosen, as recorded
         s.append(rec["selection_sentence"])
+    if route_status_sentence(rec):                     # an experimental route says so (2.15.1)
+        s.append(route_status_sentence(rec).strip())
     if fragpipe_steps_sentence(rec):
         s.append(fragpipe_steps_sentence(rec))
     for key in ("sage_route", "route_sentence"):       # how the search ran, in its own words
@@ -1774,6 +1869,8 @@ def search_paragraph(rec, de_prov=None):
         s.append(chain_mbr_sentence(rec))
     if not rec.get("params_file"):
         s.append(f"The search parameters could not be read from here: {NOT_RECORDED}.")
+        if engine_citations(rec):       # what ran is cited even when its settings are not read
+            s.append("Software citations: " + "; ".join(engine_citations(rec)) + ".")
         return " ".join(s)
     digest = []
     cl = rec.get("cleavage")
@@ -1887,7 +1984,7 @@ def search_paragraph(rec, de_prov=None):
         bw = fpp.msbooster_rerun_sentence(rec.get("msbooster_rt_bandwidth"))
         if bw:
             s.append(bw)
-    cites = fragpipe_citations(rec)
+    cites = engine_citations(rec)
     if cites:
         s.append("Software citations: " + "; ".join(cites) + ".")
     for w in rec.get("warnings") or []:
@@ -2376,6 +2473,72 @@ def de_not_measured_sentence(prov):
             + (f" ({per} proteins)." if per else f" (counts per contrast: {NOT_RECORDED})."))
 
 
+def de_onoff_sentence(prov):
+    """run_de.R's `onoff` record (MaxLFQ route, 2.15.x): the proteins detected in one group of a
+    contrast and absent from the other are listed in OnOff_Proteins.csv, not tested. The wording
+    of the rule is the record's own (`onoff.rule`); counts per contrast from `onoff.contrasts`.
+    None for a record without one (limpa infers missing values: no such list)."""
+    rec = prov.get("onoff") if isinstance(prov.get("onoff"), dict) else None
+    if not rec:
+        return None
+    file = rec.get("file") or NOT_RECORDED
+    if rec.get("status") == "failed":
+        return (f"The list of proteins detected in one group only ({file}) could not be written "
+                f"({rec.get('reason') or NOT_RECORDED}); such proteins have no fold change in the "
+                f"DE tables and are not reported here.")
+    con = rec.get("contrasts") if isinstance(rec.get("contrasts"), dict) else {}
+    per = "; ".join(f"{c}: {t.get('n_onoff', NOT_RECORDED)}" for c, t in con.items()
+                    if isinstance(t, dict))
+    skipped = rec.get("skipped") if isinstance(rec.get("skipped"), dict) else {}
+    n = rec.get("n_min")
+    out = (f"Proteins detected in one group of a comparison and in none of the other are listed "
+           f"separately ({file}) as detection patterns, not fold changes: "
+           f"{rec.get('rule') or NOT_RECORDED}"
+           + (f" Minimum {rec.get('n_min_unit') or 'run'}s in the group that has it: {n}."
+              if isinstance(n, int) else "")
+           + (f" Per comparison: {per}." if per else ""))
+    if skipped:
+        out += (f" Not assessed (not a simple two-group comparison): {', '.join(skipped)}.")
+    return out
+
+
+def de_incomplete_sentence(prov):
+    """run_de.R's `incomplete_data` record (every route, 2.15.x): the DE tables flag each
+    significant call that rests on missing values. The rule and the benchmark are the record's own
+    words (rule 1); the counts per contrast come from `de_tables`."""
+    rec = prov.get("incomplete_data") if isinstance(prov.get("incomplete_data"), dict) else None
+    if not rec:
+        return None
+    tabs = prov.get("de_tables") if isinstance(prov.get("de_tables"), dict) else {}
+    per = "; ".join(f"{c}: {t.get('n_called_incomplete', NOT_RECORDED)} of {t.get('n_significant', NOT_RECORDED)}"
+                    for c, t in tabs.items() if isinstance(t, dict))
+    return (f"Each significant protein is flagged when it was called on incomplete data (DE table "
+            f"columns {', '.join(rec.get('columns') or [])}): {rec.get('rule') or NOT_RECORDED} "
+            + (f"Significant calls on incomplete data, per comparison: {per}. " if per else "")
+            + f"{rec.get('benchmark_text') or NOT_RECORDED}")
+
+
+def de_quantums_sentence(prov):
+    """run_de.R's `quantums_tradeoff` record (MaxLFQ route): the DE was re-fitted at a fixed set of
+    QuantUMS cutoffs and the cost of each is in QuantUMS_tradeoff.csv; the cutoffs used and their
+    source (a cutoff the user did not set is tagged DEFAULT) are the record's own words."""
+    rec = prov.get("quantums_tradeoff") if isinstance(prov.get("quantums_tradeoff"), dict) else None
+    if not rec:
+        return None
+    file = rec.get("file") or NOT_RECORDED
+    if rec.get("status") != "written":
+        return (f"The QuantUMS cutoff trade-off table ({file}) was not made ({rec.get('status')}): "
+                f"{rec.get('reason') or NOT_RECORDED}.")
+    used = rec.get("used") if isinstance(rec.get("used"), dict) else {}
+    r = rec.get("recommended") if isinstance(rec.get("recommended"), dict) else {}
+    return (f"The differential expression was re-fitted at five QuantUMS cutoffs ({file}; same design, "
+            f"contrasts, coverage filter and call rule) to show what each costs. Cutoffs used here: "
+            f"PG.MaxLFQ.Quality >= {used.get('pgQ', NOT_RECORDED)}, Empirical.Quality >= "
+            f"{used.get('eQ', NOT_RECORDED)} ({rec.get('cutoff_source') or NOT_RECORDED}). "
+            f"{r.get('label') or NOT_RECORDED} is marked {r.get('tag') or NOT_RECORDED} "
+            f"({r.get('citation') or NOT_RECORDED}); {rec.get('defaults_unchanged') or NOT_RECORDED}.")
+
+
 DE_HEADING = "Differential expression"
 
 
@@ -2405,7 +2568,31 @@ def identification_filter(prov):
         filt = f"q ≤ {num(prov['q_cutoff'])}"
     else:
         filt = None
+    # 2.15.1 (lane3 #9): a cutoff nobody set is said to be the default (run_de.R q_cutoff_source)
+    src = prov.get("q_cutoff_source")
+    if filt and isinstance(src, str) and src.startswith("DEFAULT"):
+        filt += " (DEFAULT — not user-confirmed)"
     return ident, filt
+
+
+def de_matched_sentence(prov):
+    """How many quantified protein x run values rest only on peptides measured by matching
+    between runs (run_de.R detection_matrix, from Sage's Identified.In.Run, 2.15.1), or "" when
+    the record does not count them. The definition is quoted from the record
+    (`matched_definition`, which run_de.R quoted from the report's declaration, i.e.
+    sage_lfq_check.MATCHED_BETWEEN_RUNS), never re-worded here."""
+    dm = prov.get("detection_matrix") if isinstance(prov.get("detection_matrix"), dict) else {}
+    m, q = dm.get("matched_cells"), dm.get("quantified_cells")
+    if not (isinstance(m, int) and isinstance(q, int)) or isinstance(m, bool):
+        return ""
+    d = dm.get("matched_definition")
+    return (f"Of the {q:,} quantified protein × run values, {m:,} had no peptide of the protein "
+            f"identified by MS2 in that run; their values come from peptides "
+            + (d if isinstance(d, str) and d else "measured by matching between runs")
+            + ". They were tested like any other value; runs with no MS1 signal were missing "
+            "values, not measurements. The DE tables name the compared groups in which all of a "
+            "protein's values were measured by matching between runs "
+            "(matched_between_runs_only_in).")
 
 
 def de_quantity_sentence(prov, srec=None):
@@ -2445,6 +2632,9 @@ def de_paragraph(prov, srec=None):
     s.append(de_normalisation_sentence(prov))
     if prov.get("missing_policy"):
         s.append(prov["missing_policy"].rstrip(".") + ".")
+    mt = de_matched_sentence(prov)
+    if mt:
+        s.append(mt)
     ident, filt = identification_filter(prov)
     if ident:
         s.append(f"Identifications entering quantification: {ident}.")
@@ -2472,12 +2662,32 @@ def de_paragraph(prov, srec=None):
     adjp = prov.get("adjp")
     sig = (f"adj.P.Val < {adjp:g}" if isinstance(adjp, (int, float)) else
            f"adj.P.Val < {NOT_RECORDED}")
+    # 2.15.1 (lane3 #9): the threshold run_de.R defaulted is said to be a default
+    if isinstance(prov.get("adjp_source"), str) and prov["adjp_source"].startswith("DEFAULT"):
+        sig += " (DEFAULT — not user-confirmed)"
     s.append((f"Moderated t-statistics ({eng}) were computed and p-values adjusted by the "
               f"Benjamini–Hochberg method; proteins with {sig} were called significant."
               if eng else f"Proteins with {sig} (Benjamini–Hochberg) were called significant."))
+    # 2.15.1 (audit L2-10 / L2-12): which way the fold changes point when nobody chose the
+    # contrasts, and the contrasts.fit approximation when it applies -- from the DE record
+    cs = prov.get("contrasts_source")
+    dirs = prov.get("contrast_directions")
+    if isinstance(cs, str) and cs.startswith("DEFAULT") and isinstance(dirs, dict) and dirs:
+        s.append("The contrasts were the analysis default, not chosen by the user "
+                 "(DEFAULT — not user-confirmed): " + "; ".join(f"{k}, {v}"
+                                                               for k, v in dirs.items()) + ".")
+    if prov.get("contrast_fit_note"):
+        s.append(str(prov["contrast_fit_note"]))
     nm = de_not_measured_sentence(prov)
     if nm:
         s.append(nm)
+    oo = de_onoff_sentence(prov)
+    if oo:
+        s.append(oo)
+    for fn in (de_incomplete_sentence, de_quantums_sentence):
+        t = fn(prov)
+        if t:
+            s.append(t)
     if prov.get("logfc_role") == "reference_line_only":
         lf = prov.get("logfc")
         s.append("No fold-change filter was applied"
@@ -2717,6 +2927,10 @@ def main():
                                       "record is the one session.search_choice gives (wherever "
                                       "the search is; the one the DE read). Records and none "
                                       "chosen: tagged blanks, and why")
+    ap.add_argument("--acquired-at-core", action="store_true",
+                    help="the data were acquired at the UC Davis Proteomics Core: prints the "
+                         "Core's instrument acknowledgment. Not needed when the session is a Core "
+                         "run (a CoreOmics submission or Core staff's client-work mark)")
     ap.add_argument("--qc-bracket", help="qc_bracket.py's record (the session's "
                                          "logs/qc_bracket.json): its one fixed Instrument "
                                          "performance sentence -- the verdict stays staff-only")
@@ -2812,6 +3026,7 @@ def main():
         rep = dict(rep, instrument=rec_instr, instrument_source=rec_src)
     instrument = rep.get("instrument") or next((m.get("instrument") for m in metas if m.get("instrument")), None)
     ack_label, ack_text = pick_ack(instrument, files)
+    core_acquired = core_acquisition_recorded(a)
 
     srec = (ambiguous_search_record(unchosen["candidates"], unchosen["why"], unchosen["how"])
             if unchosen else
@@ -2836,15 +3051,22 @@ def main():
     is_tims = vendor == "Bruker" and ("sources" in rep or "tims" in (instrument or "").lower())
     core_tims = is_tims and rep_file.endswith(".d")
     facility = core_tims or (ack_label is not None and rep_file.endswith((".d", ".raw")))
+    # The Core's LC defaults (column, emitter, column temperature, mobile phases) only for data
+    # the Core acquired, by the same record as the acknowledgment (2.15.1 review minor 11): a
+    # timsTOF .d from another lab got the Core's column while its Acknowledgments said it was
+    # not the Core's. Data not on record get tagged blanks.
+    core_lc = core_tims and bool(core_acquired)
+    facility_lc = facility and bool(core_acquired)
     col = column_record(a.lc_column, metas if not from_record else (), a.column_log,
                         a.column_log_instrument, ser["acquired_first"], ser["acquired_last"],
-                        core=core_tims)
+                        core=core_lc)
 
     _write_text(os.path.splitext(a.out)[0] + "_params.json", json.dumps(
         {"files": [m.get("file") for m in metas], "representative": rep,
          "instrument": instrument, "vendor": vendor, "acknowledgment_for": ack_label,
          "all": metas, "from_session_record": from_record, "acquisition": acq,
          "acquisition_source": acq_src, "series": ser, "column": col, "search": srec,
+         "core_acquisition": core_acquired or None,
          "read_problems": problems}, indent=2))
 
     # A blank acquisition value is one no record holds -- never a facility default (rule 2) --
@@ -2890,7 +3112,7 @@ def main():
     w("## Liquid chromatography")
     w("")
     w(lc_paragraph(rep, col, core_tims, lc_known=bool(rep.get("lc_system")),
-                   facility=facility))
+                   facility=facility_lc))
     w("")
     w("## Mass spectrometry")
     w("")
@@ -2898,7 +3120,7 @@ def main():
         # a timsTOF not read from its .d (an mzML, the session record) states the recorded mode,
         # as the table does -- not "____ [not recorded]" beside a table row that says DIA
         w(ms_paragraph(rep if "sources" in rep else dict(rep, mode=rep.get("mode") or acq), v,
-                       coupled=bool(rep.get("lc_system"))))
+                       coupled=bool(rep.get("lc_system")), core=core_lc))
     else:
         mode = (f"{acq} mode (as detected from the data in step 2)" if acq in ("DIA", "DDA")
                 else f"[DDA/DIA — confirm] mode {NR_TAG}")
@@ -3186,7 +3408,14 @@ def main():
     w("")
     # I09's rule: outside data gets no untagged Core statement -- the name matching a Core
     # instrument does not make the Core the place it was acquired (2.14.2 review)
-    w(ack_text if facility or ack_label is None else f"{ack_text} {ACK_OUTSIDE_TAG}")
+    # The Core's sentence only for data the record shows the Core acquired (2.15.1, audit lane 3
+    # #1): an instrument NAME matching the Core's does not make the Core the place of acquisition.
+    if ack_label is None:
+        w(ack_text)
+    elif core_acquired:
+        w(ack_text if facility else f"{ack_text} {ACK_OUTSIDE_TAG}")
+    else:
+        w(ACK_NOT_CORE_BLANK)
     w("")
     w(f"*Acknowledgment source: {ACK_SOURCE} (confirm the exact current wording before publishing).*")
     w("")

@@ -27,6 +27,8 @@ import sys
 import tempfile
 import unittest
 
+from job_env import no_hive_marker
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 HIVE_PATH = os.path.join(SCRIPTS, "hive_path.sh")
@@ -175,6 +177,9 @@ class Harness(unittest.TestCase):
              "SHAREROOT": self.shareroot, "FAKE_MOUNT": self.mount_file, "FAKE_NET": self.net_file,
              "HIVE_EXEC": f"bash {self.fake_hive}", "HIVE_USER": "tester", "HIVE_KEY": self.key,
              "HIVE_ENV_FILE": os.path.join(self.d, "no.env"), "TMPDIR": self._mk("tmp")}
+        # a laptop: the HIVE marker points at nothing, or a suite run ON HIVE finds the real one
+        # and check_access.sh says on_hive (never trying the fake ssh these tests watch)
+        e.update(no_hive_marker(self.d))
         e.update(extra)
         return e
 
@@ -491,10 +496,18 @@ class PutSkillTests(Harness):
         root, hx = self.fake_skill()
         r = self.run_script(hx, "--put-skill")
         self.assertEqual(r.returncode, 0, r.stderr)
-        dests = [argv[-2:] for argv in self.calls("rsync")]
-        self.assertEqual(dests, [[os.path.join(root, d), f"tester@{HOST}:~/proteomics-pipeline/"]
-                                 for d in ("scripts", ".claude-plugin")])
-        self.assertEqual(self.calls("ssh"), [], "local paths: the put guard makes no connection")
+        # 2.15.1: the CONTENTS of each folder go into its own folder on HIVE with --delete (a script a
+        # release removed no longer stays there); nothing else is ever the target of --delete
+        calls = self.calls("rsync")
+        self.assertEqual([argv[-2:] for argv in calls],
+                         [[os.path.join(root, d) + "/", f"tester@{HOST}:~/proteomics-pipeline/{d}/"]
+                          for d in ("scripts", ".claude-plugin")])
+        for argv in calls:
+            self.assertIn("--delete", argv)
+        # the only connections are the two record-keeping calls (the version HIVE had, .put_record);
+        # the put guard itself makes none
+        for argv in self.calls("ssh"):
+            self.assertTrue(any("plugin.json" in a or ".put_record" in a for a in argv), argv)
 
     def test_without_plugin_json_nothing_is_put(self):
         _, hx = self.fake_skill(with_plugin=False)

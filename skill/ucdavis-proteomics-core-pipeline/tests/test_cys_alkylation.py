@@ -465,22 +465,33 @@ class OtherRoutes(unittest.TestCase):
             self.assertIn("--threads 16 --cys-alkylation cam", step1)
 
     def test_a_radiant_library_is_reused_only_for_the_same_choice(self):
+        """And, from 2.15.1, only for the same FASTA, DIA-NN and prediction flags
+        (make_radiant_library.library_recipe; audit 2026-11-17, lane 1 #1)."""
+        import make_radiant_library as mrl
         with tempfile.TemporaryDirectory() as d:
             tsv = os.path.join(d, "radiant_library.tsv")
             with open(tsv, "w") as fh:
                 fh.write("x" * 1_100_000)
+            fasta = os.path.join(d, "db.fasta")
+            with open(fasta, "w") as fh:
+                fh.write(">sp|P1|X\nPEPTIDEK\n")
             argv = [sys.executable, os.path.join(SCRIPTS, "make_radiant_library.py"),
-                    "--out-dir", d, "--diann", "/nonexistent/diann", "--fasta", "/x.fasta"]
+                    "--out-dir", d, "--diann", "/nonexistent/diann", "--fasta", fasta]
             # no record: a pre-2.12 library, predicted with nothing fixed on C -- rebuilt
             p = subprocess.run(argv, capture_output=True, text=True)
             self.assertNotIn('"reused": true', p.stdout)
+            # a 2.12-2.15.0 record names only the cysteine choice: rebuilt too
             with open(tsv + ".meta.json", "w") as fh:
                 json.dump({"cys_alkylation": "cam"}, fh)
+            p = subprocess.run(argv, capture_output=True, text=True)
+            self.assertNotIn('"reused": true', p.stdout)
+            self.assertIn("not reused", p.stderr)
+            with open(tsv + ".meta.json", "w") as fh:
+                json.dump(mrl.library_recipe("/nonexistent/diann", fasta, "cam"), fh)
             p = subprocess.run(argv, capture_output=True, text=True)
             self.assertEqual(json.loads(p.stdout)["reused"], True)
             p = subprocess.run(argv + ["--cys-alkylation", "none"], capture_output=True, text=True)
             self.assertNotIn('"reused": true', p.stdout)
-
 
 if __name__ == "__main__":
     unittest.main()

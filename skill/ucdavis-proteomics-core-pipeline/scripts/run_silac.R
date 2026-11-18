@@ -281,6 +281,22 @@ w <- silac_wide(dd)
 loaded <- lapply(setNames(groups, groups), function(g) unique(ratio_asg[Group == g]$Replicate))
 min_reps_for <- function(n) if (!is.null(min_reps_given)) min_reps_given else max(3L, as.integer(ceiling(n / 2)))
 min_reps_all <- min_reps_for(length(reps_all))      # the detection patterns' threshold
+# Fewer replicates than the default minimum (lane4 M24): with n < 3 replicates of a comparison
+# the default minimum (3) is above n, so it would test NOTHING and say little. Refused, loudly,
+# with the choice: --min-replicates 2 (a test on 2 replicates, said in the Methods as the user's
+# choice) or no test for that comparison. With 1 replicate no test is possible at all.
+.short <- vapply(seq_len(nrow(cmp)), function(i)
+  length(intersect(loaded[[cmp$numerator[i]]], loaded[[cmp$denominator[i]]])), 0L)
+.under <- .short < vapply(.short, min_reps_for, 0L)
+if (any(.under))
+  stop(sprintf(paste0(
+    "too few replicates to test: %s. The default needs a ratio in at least max(3, half the ",
+    "replicates), more replicates than these comparisons have, so they would test nothing. ",
+    "Ask the user: run again with --min-replicates 2 to test comparisons with 2 replicates ",
+    "(stated in the Methods as their choice; 2 replicates give little power), or drop those ",
+    "comparisons (--comparisons). A comparison with 1 replicate cannot be tested."),
+    paste(sprintf("%s has %d replicate(s)", cmp$contrast[.under], .short[.under]),
+          collapse = "; ")), call. = FALSE)
 results <- list(); offsets <- list(); tables_rec <- list()
 for (i in seq_len(nrow(cmp))) {
   a <- cmp$numerator[i]; b <- cmp$denominator[i]; ct <- cmp$contrast[i]

@@ -22,21 +22,21 @@ A **high-throughput plate** is a different route: STAN knows its file list
 - 248: 0. `identify` — which submission is this data? (where the key is)
 - 337: 1. `fetch` — the submission, its neighbours, its shares (where the key is)
 - 412: 2. `locate` — find each sample's raw file (HIVE)
-- 609: 3. `stage` — link the raw files into the service directory (HIVE)
-- 678: Symlink visibility — measured, and the rules that follow
-- 698: 4. `conditions` — the design from CoreOmics
-- 723: 5. The search and DE — session on HIVE, report written locally
-- 794: 6. `deliver` — real files into the Bioshare folder (HIVE)
-- 990: 7. `bioshare` — register and share (where the key is)
-- 1026: 8. `email-draft`
-- 1062: Several submissions in one analysis
-- 1109: Core client work with no CoreOmics submission yet (the feedback survey)
-- 1187: Troubleshooting by exit code
-- 1203: The linked-share lesson
-- 1214: Less-used flags
-- 1224: Step 1 for Core staff: where the CoreOmics steps run, and `identify`
-- 1255: 1c. The service run, step by step (step 1c)
-- 1464: 12b. Deliver to the collaborator (step 12b)
+- 610: 3. `stage` — link the raw files into the service directory (HIVE)
+- 679: Symlink visibility — measured, and the rules that follow
+- 699: 4. `conditions` — the design from CoreOmics
+- 724: 5. The search and DE — session on HIVE, report written locally
+- 795: 6. `deliver` — real files into the Bioshare folder (HIVE)
+- 991: 7. `bioshare` — register and share (where the key is)
+- 1027: 8. `email-draft`
+- 1063: Several submissions in one analysis
+- 1120: Core client work with no CoreOmics submission yet (the feedback survey)
+- 1198: Troubleshooting by exit code
+- 1214: The linked-share lesson
+- 1225: Less-used flags
+- 1235: Step 1 for Core staff: where the CoreOmics steps run, and `identify`
+- 1266: 1c. The service run, step by step (step 1c)
+- 1475: 12b. Deliver to the collaborator (step 12b)
 <!-- /contents -->
 
 ## Why this needs its own script
@@ -521,7 +521,8 @@ name match. A `locate` re-run after `attach` for the same submission is read fro
 never a re-injection: `choose_run` (`kind: collision`) needs `--choose` per sample under every
 policy. Different files sharing a run name (the same name in two folders) are kept and flagged
 (`repeated_names` WARN); `run_search.py` stops before searching them as given, so `all` with
-same-named re-injections stops there until the 2.11 unique-run-name route lands.
+same-named re-injections stops there (no route searches two files of one name together): ask
+staff to keep one injection of each such sample (`--reinjections latest` or `--choose`).
 
 Also hard gates: `no_files`, `duplicate_ids`, and `duplicate_assignment` (one file claimed by
 two samples). **`duplicate_ids`: two samples of this submission share a label** (`KG1` and
@@ -725,7 +726,7 @@ labels are the groups).
 **"I only require raw data" submissions get no search and no DE** unless staff explicitly ask:
 go straight to step 12b (section 6, `deliver`) with `--mode raw-only`.
 
-Otherwise run SKILL.md steps 2–9 with the **session of record on HIVE**, under the work dir (the
+Otherwise run SKILL.md steps 2–12 with the **session of record on HIVE**, under the work dir (the
 same run step by step, as SKILL.md step 1c sends you to it: "1c. The service run, step by step"
 below):
 ```
@@ -969,8 +970,8 @@ relative links in `<share>/raw/` to the staged files. The service project gets a
 
 > ⚠ **Check once: relative `raw/` links in Bioshare.** Brett reports an earlier submission's absolute raw
 > links download from Bioshare, and a relative link resolves to the same files, but nobody has
-> opened a relative one in Bioshare yet. For the first raw-link delivery, **open the Bioshare
-> link yourself and download one raw file before `bioshare send`**. `deliver` prints this
+> opened a relative one in Bioshare yet. For the first raw-link delivery, **ask the staff member
+> to open the Bioshare link and download one raw file before `bioshare send`**. `deliver` prints this
 > warning and records `raw_whitelist_unverified: true`.
 
 **Size guard:** above `--max-gb` (default 5) it writes `deliver_job.sh` and exits **5** —
@@ -1061,11 +1062,19 @@ address failed its check.
 
 ## Several submissions in one analysis
 
-Staff sometimes want two or more submissions analysed together (asked for on 2026-10-08: two
-submissions of one study, one session). Every step of this runbook handles one submission at a
-time, so the supported way is one session that answers the **main** submission and names the
-others. The main one is the first staff named, unless they say another is; ask once when they
-named several and it is not clear which leads.
+Staff sometimes want two or more submissions analysed together (two submissions of one
+study, one session). Every step of this runbook handles one submission at a time, so the
+supported way is one session that answers the **main** submission and names the others. The
+main one is the first staff named, unless they say another is; ask once when they named
+several and it is not clear which leads.
+
+**Same lab only, by default.** Compare the PI on each `submission_summary.json` first. When
+every submission has the same PI (one lab, one client), go on as below. When they do not, the
+analysis would put one client's samples and identifiers into another client's report, which
+SKILL.md golden rule 12 forbids: tell staff, and analyse each submission on its own unless they
+say both labs agreed to a joint analysis. Even then, nothing delivered names another lab's
+submission number, PI or people (counts only: "12 samples from a second submission"), and each
+lab gets only its own share.
 
 1. **Steps 1–4 for each submission** (`fetch`, `locate`, `stage`, `conditions`), each in its own
    `~/core/PROT_####` folder and staged in its own service folder. The one staff confirmation
@@ -1091,9 +1100,10 @@ PROT_0807 and PROT_9001 analysed together; PROT_0807 record attached
 <the staff member's words>
 EOF
 ```
-   - in `AI_Analysis_Report.md` (step 9): near the top, one sentence per other submission (its
-     number, its PI, the samples it brought), from its own `submission_summary.json`. Its
-     sample sheet against its files was checked by its own `locate`.
+   - in `AI_Analysis_Report.md` (step 9): near the top, one sentence per other submission, from
+     its own `submission_summary.json`: its number, its PI and the samples it brought when it is
+     the same lab; only the number of samples it brought when it is not (above). Its sample
+     sheet against its files was checked by its own `locate`.
 4. **The design:** build each submission's conditions with `conditions` and combine them into
    one `conditions.csv`, confirmed once with staff. A condition name both submissions use is one
    group only if staff say so. Submissions prepared or run at different times are a likely
@@ -1101,8 +1111,9 @@ EOF
 5. **Delivery:** `deliver` takes the combined session into the **main** submission's share only.
    For another submission it refuses (exit 2: the session sits under the main one's stage
    record); never work around that. Ask staff how that submission's people get the results:
-   usually the main share's link (the same lab), and its raw data, when wanted, delivered on its
-   own (`deliver --summary ~/core/PROT_9001/submission_summary.json --mode raw-only`).
+   the main share's link only when it is the same lab (another lab never gets it), and its raw
+   data, when wanted, delivered on its own (`deliver --summary
+   ~/core/PROT_9001/submission_summary.json --mode raw-only`).
 6. **The board:** one thread per submission, the records in the main one's thread
    (`references/board.md` section 2, "Several submissions in one analysis").
 
@@ -1376,7 +1387,7 @@ submission, the same path locally and on HIVE (`~/core/PROT_0807`).
    whose `locate` hard-failed.
 6. **"I only require raw data"** (`raw_data_only: true`) → **no search and no DE** unless staff
    explicitly ask. Go straight to step 12b, `deliver --mode raw-only`.
-7. **Otherwise steps 2–9, with the session ON HIVE under the work dir** — HIVE holds the
+7. **Otherwise steps 2–12, with the session ON HIVE under the work dir** — HIVE holds the
    session of record; the local copy exists only to write the report.
    ```
    bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/session.py init \
@@ -1564,14 +1575,15 @@ python3 scripts/core_submission.py email-draft --summary ~/core/PROT_0807/submis
   share.** Over 5 GB it exits 5 with a `deliver_job.sh` (golden rule #3).
 - **Check raw links once in Bioshare.** Brett reported an earlier submission's (absolute) raw links download
   from Bioshare; relative links resolve to the same files, but nobody has yet opened one there.
-  On the first raw-link delivery, open the Bioshare link and download one raw file before `send`.
+  On the first raw-link delivery, ask the staff member to open the Bioshare link and download one
+  raw file before `send` (you cannot open a browser for them).
 - `bioshare ensure --apply` registers the share dir with CoreOmics' Bioshare plugin (after
   `deliver --apply` created it) and prints its URL.
 - **Ask once, in plain words: "Share with <submitter>, <PI> and the submission's contacts
   now?"** Only on a yes, `bioshare send --delivery ~/core/PROT_0807/delivery.json --apply`. It
   refuses a `delivery.json` that did not verify or belongs to another share. It grants view +
   download — outward-facing, and separate from the compute yes (golden rule #1). Silent by
-  default; `--email` also has Bioshare notify them.
+  default; `--email` also has Bioshare email them, only when staff said so in that answer.
 - `email-draft` writes a draft and never sends. Give it to the staff member to send. Its wording
   follows the delivery's `mode` (a no-de delivery: the report and the raw data, with the
   statistics not included — never "raw data only" when a report went out). Its header names each

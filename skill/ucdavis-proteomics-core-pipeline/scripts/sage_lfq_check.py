@@ -96,20 +96,109 @@ PSM_Q = 0.01            # the peptide_q Sage's LFQ feature map takes (lfq.rs bui
 # against Sage's logged 17,288. No FDR harm; Sage's count is recorded beside what was kept.
 LFQ_Q_MAX = 0.05
 
+# What a Sage LFQ value is in a run where MS2 did NOT identify the peptide. ONE definition
+# (2.15.1 correction): every message, record, column description and Methods sentence quotes
+# MATCHED_BETWEEN_RUNS / NO_MS1_SIGNAL, and classify_rows() is the one count. Read from Sage
+# v0.14.7 crates/sage/src/lfq.rs (docs: sage-docs results/lfq): build_feature_map takes the
+# peptides at peptide_q <= 0.01 (target, over all runs together); quantify() traces their MS1
+# isotope peaks within ppm_tolerance and an RT window around the peptide's ALIGNED retention time
+# in EVERY run; Traces::integrate() sums each run's OWN signal over one shared peak window, and a
+# run with no signal there gets 0.0. So the intensity is measured in that run (match-between-runs
+# style, as DIA-NN's MBR); only the peptide's IDENTITY comes from the runs where MS2 identified
+# it, and Sage gives no per-run FDR for that identity. Never "transferred", "filled in" or
+# "copied": no number is moved between runs.
+MATCHED_LABEL = "measured by matching between runs"
+MATCHED_BETWEEN_RUNS = (f"{MATCHED_LABEL}: Sage found the peptide's MS1 signal at its aligned "
+                        f"retention time in a run where it was not identified by MS2")
+MATCHED_BETWEEN_RUNS_NOTE = ("The intensity is that run's own MS1 signal; only the peptide's "
+                             "identity comes from the runs where MS2 identified it, and Sage gives "
+                             "no per-run FDR for that identity.")
+NO_SIGNAL_LABEL = "no MS1 signal"
+NO_MS1_SIGNAL = (f"{NO_SIGNAL_LABEL}: Sage found no MS1 signal for the peptide in that run "
+                 f"(intensity 0 or missing); the value is treated as missing, not as a measurement")
+# sage_adapt.json `row_evidence` keys (classify_rows); the three counts add up to `rows`
+ROW_EVIDENCE_KEYS = ("identified_in_run", "matched_between_runs", "no_ms1_signal")
 
-def methods_sentence(q_value_max=LFQ_Q_MAX):
+
+def has_ms1_signal(v):
+    """A Sage LFQ intensity is a measurement only when it is a finite number > 0 (lfq.rs gives a
+    run with no peak 0.0; a null is no value). The one test, for the counts and the report."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(f) and f > 0
+
+
+def classify_rows(identified, intensities):
+    """The three-way count of Sage report rows (one per peptide and run), ONE definition:
+    identified_in_run -- MS2 identified the peptide in that run and it has MS1 signal;
+    matched_between_runs -- not identified in that run, MS1 signal found (MATCHED_BETWEEN_RUNS);
+    no_ms1_signal -- intensity 0 or missing, identified or not (NO_MS1_SIGNAL): a missing value.
+    `identified`: per row 1/0 (truthy = identified in that run); `intensities`: per row.
+    Also `no_ms1_signal_identified_in_run` (of no_ms1_signal, those MS2 did identify there)."""
+    n = {k: 0 for k in ROW_EVIDENCE_KEYS}
+    n["no_ms1_signal_identified_in_run"] = 0
+    for i, v in zip(identified, intensities):
+        if not has_ms1_signal(v):
+            n["no_ms1_signal"] += 1
+            if i:
+                n["no_ms1_signal_identified_in_run"] += 1
+        elif i:
+            n["identified_in_run"] += 1
+        else:
+            n["matched_between_runs"] += 1
+    n["rows"] = sum(n[k] for k in ROW_EVIDENCE_KEYS)
+    return n
+
+
+def row_evidence_sentence(n):
+    """The three classify_rows() counts in a Methods section's words, or "" without a full
+    count."""
+    if not isinstance(n, dict) or not all(isinstance(n.get(k), int) and not isinstance(n.get(k), bool)
+                                          for k in ROW_EVIDENCE_KEYS + ("rows",)):
+        return ""
+    return (f"Of the {n['rows']:,} peptide × run values kept, {n['identified_in_run']:,} were "
+            f"identified by MS2 in their run, {n['matched_between_runs']:,} were "
+            f"{MATCHED_LABEL}, and {n['no_ms1_signal']:,} had {NO_SIGNAL_LABEL} (missing values).")
+
+
+def methods_sentence(q_value_max=LFQ_Q_MAX, protein_q=None, shared_rule=None,
+                     matches_labelled=False, row_evidence=None):
     """A quantifying Sage search's identification FDR in a Methods section's words: the rule
     run_search.adapt_sage keeps report rows with (PSM_Q, the line Sage's feature map takes -- lfq.rs
     build_feature_map, `peptide_q <= 0.01 && label == 1` at v0.14.7 -- and the MS1-peak q it kept,
     `q_value_max`, LFQ_Q_MAX unless a record says otherwise). adapt_sage writes it into
     sage_adapt.json `methods_sentence`; make_methods.py quotes it, or builds it with this from an
     older record's own q_value_max. The identifications-only route has its own
-    (run_search.SAGE_IDS_METHODS)."""
-    return (f"Peptides were quantified from Sage's label-free MS1 quantification: Sage traced "
-            f"the MS1 signal of the peptides it identified at {PSM_Q * 100:g}% FDR (peptide-level "
-            f"q-value <= {PSM_Q:g}, computed over all runs together), and an MS1 peak was kept "
-            f"when it was a target peak with Sage's MS1-integration q-value <= {q_value_max:g}; "
-            f"no protein-level FDR filter was applied.")
+    (run_search.SAGE_IDS_METHODS).
+
+    2.15.1 (audit L2-4 / L2-6, wording corrected): `protein_q` -- the Sage picked-protein q-value
+    the rows were kept at (None: no protein filter, said so); `shared_rule` -- how peptides shared
+    between proteins were handled (run_search.SAGE_SHARED_RULE); and, always, that Sage measures
+    each peptide's MS1 signal in every run at its aligned retention time, so a value in a run
+    that did not identify it is MATCHED_BETWEEN_RUNS, and NO_MS1_SIGNAL is missing.
+    `matches_labelled`: the report marks each value (Identified.In.Run); `row_evidence`: the
+    classify_rows() counts, said when given."""
+    s = (f"Peptides were quantified from Sage's label-free MS1 quantification: Sage traced "
+         f"the MS1 signal of the peptides it identified at {PSM_Q * 100:g}% FDR (peptide-level "
+         f"q-value <= {PSM_Q:g}, computed over all runs together), and an MS1 peak was kept "
+         f"when it was a target peak with Sage's MS1-integration q-value <= {q_value_max:g}; ")
+    s += (f"protein groups were kept at Sage's picked-protein q-value <= {protein_q:g}."
+          if protein_q is not None else "no protein-level FDR filter was applied.")
+    if shared_rule:
+        s += f" Shared peptides: {shared_rule}."
+    s += (" Sage integrates each such peptide's MS1 signal in every run at its aligned retention "
+          f"time, so a value in a run where MS2 did not identify the peptide was "
+          f"{MATCHED_BETWEEN_RUNS}. {MATCHED_BETWEEN_RUNS_NOTE} A value with {NO_MS1_SIGNAL}.")
+    if matches_labelled:
+        s += (" Each value is marked as identified in its run or not (Identified.In.Run); values "
+              "with MS1 signal count as present whether identified or matched, and values with no "
+              "MS1 signal count as absent.")
+    ev = row_evidence_sentence(row_evidence)
+    if ev:
+        s += " " + ev
+    return s
 
 
 def q_passes(q):

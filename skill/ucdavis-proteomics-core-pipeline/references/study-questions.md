@@ -94,7 +94,7 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
     `neuron_culture`, `stem_cell_culture` — offer the one matching the sample type the user
     gave (below), never one matched to a file name.
   - `none` — only if the user explicitly declines. Record it; the contaminant
-    anomaly check in step 10 is meaningless without contaminants in the database.
+    anomaly check in step 8c is meaningless without contaminants in the database.
 
 ## SILAC (plexDIA)
 
@@ -148,7 +148,7 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
   submission record, says so; a submission that names an enzyme is the answer, recorded as such.
 - **It picks the route.** No enzyme added (a peptidome, hydrolysate, HLA or pepsin digest) goes to
   `--enzyme none`: FragPipe's non-specific workflow for DDA (Sage at the Orbitrap's tolerance
-  misses most of it; search-engines.md "4a."). Semi-specific (N-terminomics, endogenous cleavage,
+  misses most of it; search-engines.md "4c."). Semi-specific (N-terminomics, endogenous cleavage,
   degraded or processed samples such as hair) is `--semi-specific`, with a much larger search space.
 - **Carry the answer through unchanged:** `--enzyme <name|none>` / `--semi-specific` on step 4
   (`resolve_defaults.py`), `fetch_fasta.py fetch --enzyme` (step 6), step 6b (`estimate_params.py`,
@@ -194,10 +194,11 @@ python3 scripts/fetch_fasta.py resolve --organism "<what they said>"   # or --ta
 ## Keratin samples
 
 - **Is the sample keratin?** Decide it from the sample type the user gave (above). Core staff,
-  not asked the sample type: ask only "are the samples keratin tissue (hair, wool, skin, nail,
-  feather …)?" when the submission's description or anything they said names one of those
-  tissues; otherwise pass neither `--keratin-sample` nor `--no-keratin-sample` (step 6): the
-  sidecar then records the default, never an answer nobody gave. When the
+  not asked the sample type: ask the one yes/no question "are the samples keratin tissue (hair,
+  wool, skin, nail, feather …)?" on **every** run, before the FASTA is built; a submission
+  nobody describes as hair would otherwise get the default and lose its analyte. Pass their
+  answer (`--keratin-sample` / `--no-keratin-sample`, step 6); only when nobody can answer, pass
+  neither: the sidecar then records the default, never an answer nobody gave. When the
   samples are **hair, wool, fur, feather, skin (epidermis /
   stratum corneum), nail, claw, hoof, horn, beak, baleen, quill or scale**, this is a
   **keratin sample**: keratin is the *analyte*, not handling contamination. Decide it here,

@@ -317,7 +317,8 @@ class Paragraphs(unittest.TestCase):
         raws = [make_timstof_d(os.path.join(cls.tmp.name, f"r{i}.d"),
                                acquired=f"2026-08-13T1{8 + i}:00:00.000-07:00")
                 for i in range(2)]
-        cls.text, cls.params = run_methods(cls.tmp.name, raws)
+        # a Core run (2.15.1 review: the Core's LC defaults need the Core acquisition on record)
+        cls.text, cls.params = run_methods(cls.tmp.name, raws, "--acquired-at-core")
         cls.lc = section(cls.text, "Liquid chromatography")
         cls.ms = section(cls.text, "Mass spectrometry")
 

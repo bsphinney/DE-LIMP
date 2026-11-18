@@ -675,7 +675,14 @@ def _trfp_not_found():
 # `dotnet` muxer uses ONLY its own directory and ignores DOTNET_ROOT.
 # ---------------------------------------------------------------------------
 DOTNET_DIR_ENV = "PROTEOMICS_DOTNET_DIR"          # ensure_dotnet8.sh's install location
-DOTNET_DIR_DEFAULT = "~/.proteomics-pipeline/dotnet8"
+DOTNET_DIR_DEFAULT = "~/.proteomics-pipeline/dotnet8"   # its default with no pipeline home set
+
+
+def dotnet_dir_default():
+    """ensure_dotnet8.sh's default install location (its DEST with no PROTEOMICS_DOTNET_DIR):
+    dotnet8 in $PROTEOMICS_PIPELINE_HOME, else DOTNET_DIR_DEFAULT (2.15.1, HIVE F5)."""
+    home = os.environ.get(PIPELINE_HOME_ENV)
+    return os.path.join(home, "dotnet8") if home else os.path.expanduser(DOTNET_DIR_DEFAULT)
 # The host's own default locations, as an os.pathsep list. Only the tests set it (so a .NET
 # on the machine running them cannot change the answer); nobody else needs to.
 DOTNET_SYSTEM_ROOTS_ENV = "PROTEOMICS_DOTNET_SYSTEM_ROOTS"
@@ -724,7 +731,10 @@ def dotnet_root_candidates():
 
     add("$DOTNET_ROOT", os.environ.get("DOTNET_ROOT"))
     add(f"${DOTNET_DIR_ENV}" if os.environ.get(DOTNET_DIR_ENV) else "ensure_dotnet8.sh's install",
-        os.environ.get(DOTNET_DIR_ENV) or os.path.expanduser(DOTNET_DIR_DEFAULT))
+        os.environ.get(DOTNET_DIR_ENV) or dotnet_dir_default())
+    # ... which reuses a good root at its old default (~/.proteomics-pipeline/dotnet8)
+    if not os.environ.get(DOTNET_DIR_ENV):
+        add("ensure_dotnet8.sh's install", os.path.expanduser(DOTNET_DIR_DEFAULT))
     # set by `module load dotnet-core-sdk/<v>` on HIVE (spack's <PACKAGE>_ROOT)
     add("$DOTNET_CORE_SDK_ROOT", os.environ.get("DOTNET_CORE_SDK_ROOT"))
     on_path = shutil.which("dotnet")
@@ -811,7 +821,7 @@ def dotnet_root_lacks(root, needs, muxer=False):
 
 def _dotnet_fix():
     helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ensure_dotnet8.sh")
-    dest = os.environ.get(DOTNET_DIR_ENV) or DOTNET_DIR_DEFAULT
+    dest = os.environ.get(DOTNET_DIR_ENV) or dotnet_dir_default()
     return (f"Fix, then re-run: `bash {helper}` (installs Microsoft.NETCore.App and "
             f"Microsoft.AspNetCore.App 8.0 into {dest}, which is checked here; "
             f"needs internet; on a cluster login node its download runs itself on a compute "
@@ -1836,9 +1846,28 @@ def dashed_warning(rec):
             f"{RENAME_DASHED_FLAG}), and pass {RENAME_DASHED_FLAG} to run_search.py at step 7")
 
 
+RUN_SUFFIXES = (".d", ".raw", ".mzml", ".wiff", ".wiff2")
+
+
+def folder_runs(path):
+    """None when `path` is a run (a file, or a Bruker .d folder); else the runs one level inside the
+    ordinary folder it is, sorted -- [] when there are none. The skill's description invites
+    "points at a folder", and a folder used to come back as one "unrecognized extension" file."""
+    if not os.path.isdir(path) or path.rstrip("/\\").lower().endswith(RUN_SUFFIXES):
+        return None            # a Bruker .d, or a Waters .raw FOLDER, is itself the run
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return []
+    return [os.path.join(path, n) for n in names if n.lower().endswith(RUN_SUFFIXES)]
+
+
 def main(argv):
     usage = (f"usage: detect_acquisition.py [{ALLOW_LOGIN_NODE}] FILE [FILE ...]\n"
              f"       detect_acquisition.py {CHECK_READER}")
+    if argv in (["-h"], ["--help"]):
+        print(usage)
+        sys.exit(0)
     if argv == [CHECK_READER]:
         # setup.sh's readiness report: which parser, and does it start. Exit 0 = ready.
         st = reader_status()
@@ -1864,7 +1893,23 @@ def main(argv):
         sys.exit(2)
     files = []
     for a in argv:
-        files.extend(sorted(glob.glob(a)) or [a])
+        hit = sorted(glob.glob(a))
+        if not hit:
+            # A path that is not there used to be classified as an "unrecognized extension" (or, for a
+            # .raw, blamed on ThermoRawFileParser) and exit 0, so a typo looked like a detection.
+            print(f"detect_acquisition.py: not found: {a} -- check the path (nothing was read)",
+                  file=sys.stderr)
+            sys.exit(2)
+        for h in hit:
+            runs = folder_runs(h)
+            if runs is None:
+                files.append(h)
+            elif not runs:
+                print(f"detect_acquisition.py: {h} is a folder with no .d, .raw, .mzML or .wiff runs "
+                      f"in it -- pass the run files themselves (nothing was read)", file=sys.stderr)
+                sys.exit(2)
+            else:
+                files.extend(runs)
     n_raw = sum(1 for f in files if is_thermo_raw(f))
     # Can the parser start here at all? The directory check first -- it starts nothing, so it
     # may run before the login-node refusal -- then, if the refusal lets us through, one

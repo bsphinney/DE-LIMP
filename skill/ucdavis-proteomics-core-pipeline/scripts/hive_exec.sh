@@ -282,6 +282,17 @@ tar_put() {
   fi
 }
 
+# put_skill_guard <local dir> <scripts|.claude-plugin>: true only when `rsync --delete` into
+# ~/proteomics-pipeline/<name>/ is safe -- the destination is spelled from a fixed list here (it ends
+# in proteomics-pipeline/scripts or /.claude-plugin, nothing else), and the source is the skill's own
+# folder, readable and not empty (an empty or wrong source with --delete would empty the target).
+put_skill_guard() {
+  local src="$1" name="$2" dest="~/proteomics-pipeline/$2/" marker
+  case "$name" in scripts) marker=hive_exec.sh ;; .claude-plugin) marker=plugin.json ;; *) return 1 ;; esac
+  case "$dest" in "~/proteomics-pipeline/scripts/"|"~/proteomics-pipeline/.claude-plugin/") ;; *) return 1 ;; esac
+  [ -d "$src" ] && [ -f "$src/$marker" ] && [ -n "$(ls -A "$src" 2>/dev/null)" ]
+}
+
 case "${1:-}" in
   # The skill's scripts/ and .claude-plugin/ (the version) side by side, as in the skill itself.
   --put-skill) [ $# -eq 1 ] || usage
@@ -289,9 +300,23 @@ case "${1:-}" in
          [ -f "$root/.claude-plugin/plugin.json" ] || {
            echo "hive_exec.sh: no .claude-plugin/plugin.json beside $HERE -- run this from the" >&2
            echo "installed skill, whose version it records." >&2; exit 2; }
+         # What HIVE held before, and what goes there (versions, and this copy's git commit when it
+         # is in a git clone): written to HIVE's .put_record afterwards, so "which skill ran this
+         # job" has an answer. Nothing here fails the put.
+         from_v="$(rssh "sed -nE 's/^ *\"version\": *\"([^\"]*)\".*/\\1/p' ~/proteomics-pipeline/.claude-plugin/plugin.json 2>/dev/null | head -n1" 2>/dev/null </dev/null || true)"
+         to_v="$(bash "$HERE/skill_version.sh" 2>/dev/null || true)"
+         to_c="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
          for d in scripts .claude-plugin; do
-           bash "$HERE/hive_exec.sh" --put "$root/$d" '~/proteomics-pipeline/' || exit
+           if command -v rsync >/dev/null 2>&1 && put_skill_guard "$root/$d" "$d"; then
+             # --delete ONLY inside the skill's own install folder, and only after put_skill_guard:
+             # a script removed or renamed in a release no longer stays on HIVE, importable and runnable.
+             rsync -e "$RSYNC_E" -a --delete "$(winpath "$root/$d")/" "$HU@$HOST:~/proteomics-pipeline/$d/" || exit
+           else
+             bash "$HERE/hive_exec.sh" --put "$root/$d" '~/proteomics-pipeline/' || exit
+             echo "hive_exec.sh: no rsync (or the guard refused --delete): files this release removed were NOT deleted from ~/proteomics-pipeline/$d on HIVE" >&2
+           fi
          done
+         rssh "printf '%s\\t%s -> %s\\t%s\\t%s\\n' \"\$(date -u +%Y-%m-%dT%H:%MZ)\" $(printf '%q' "${from_v:-?}") $(printf '%q' "${to_v:-?}") $(printf '%q' "${to_c:-no-git-commit}") $(printf '%q' "$HU") >> ~/proteomics-pipeline/.put_record" </dev/null 2>/dev/null || true
          echo "put $root/scripts and $root/.claude-plugin into ~/proteomics-pipeline/ on HIVE" ;;
   --put) [ $# -eq 3 ] || usage; shift; put_guard "$1"; src="$(winpath "$1")"
          if ! is_plain_path "$2"; then tar_put "$src" "$2"

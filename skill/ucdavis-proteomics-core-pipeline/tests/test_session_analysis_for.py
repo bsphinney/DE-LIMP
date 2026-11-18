@@ -68,10 +68,13 @@ class AnalysisFor(unittest.TestCase):
                          {"internal": "Astral HeLa gradient test"})
 
     def test_without_either_nothing_is_recorded(self):
-        """An outside user's analysis (never asked) is exactly as before: no session.json."""
+        """An outside user's analysis (never asked) records no analysis_for. Its session.json, if
+        any, holds only the AI assistant the environment names (2.15.1 follow-up: ai_agent)."""
         j = self.init()
         self.assertIsNone(j["analysis_for"])
-        self.assertFalse(os.path.exists(os.path.join(j["created"], "session.json")))
+        sj = os.path.join(j["created"], "session.json")
+        if os.path.exists(sj):
+            self.assertEqual(set(self.session_json(j["created"])), {"ai_agent"})
         self.assertIsNone(session.analysis_for(j["created"]))
 
     def test_a_wrong_answer_is_refused_before_anything_is_made(self):

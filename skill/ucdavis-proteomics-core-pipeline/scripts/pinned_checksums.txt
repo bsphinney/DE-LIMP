@@ -1,0 +1,12 @@
+# key	sha256	source (the vendor's own release metadata, read 2026-11-17)
+# Space or tab separated. A build with no line here is downloaded and reported "not verified".
+# A key is <engine>-<version>[-<platform>]. To add one, copy the vendor's published value; never
+# hash a download of your own and paste that.
+fragpipe-24.0-linux	6a7ad80b81d7e93e8fa194c1d22228ee35ea9a2ae8ba8dc6964bb26ea4385137	GitHub release Nesvilab/FragPipe tag 24.0, asset FragPipe-24.0-linux.zip, digest field
+diann-2.7.0-linux	246ca8baf2e9f308854976f94b8761e452275a97b3632070e275a2b4401cb223	GitHub release vdemichev/DiaNN tag 2.0, asset DIA-NN-2.7.0-Academia-Linux.zip, digest field
+diann-2.6.1-linux	f98e396af791f1903168b365a83fc2cc72208cc133281b9ce6ebe3a794b999ba	GitHub release vdemichev/DiaNN tag 2.0, asset DIA-NN-2.6.1-Academia-Linux.zip, digest field
+micromamba-2.10.0-0-linux-64	701f39c06f8e6a670a0e186c8479b9e5c0502a2f0cda6cef65d83bdd2875e8bd	GitHub release mamba-org/micromamba-releases tag 2.10.0-0, asset micromamba-linux-64, digest field
+micromamba-2.10.0-0-linux-aarch64	3bb56786e21b9b24024f599fe9185b4a59dc3f9f59937a42311ee583adbbb23c	same release, asset micromamba-linux-aarch64
+micromamba-2.10.0-0-osx-64	8421462a1ef1df9f7acd114f9e2a24c1332ce4f4e29f44465b4acb44e2755172	same release, asset micromamba-osx-64
+micromamba-2.10.0-0-osx-arm64	c547639f5caf742236641c362746abb4a3505774753ecd08fe341643670c4c01	same release, asset micromamba-osx-arm64
+dotnet-install-5147e32	082f7685e156738a1b2e2ed8381a621870d4ce8e8c59278034556f05c186eb2e	dotnet/install-scripts commit 5147e32300a8e908f5d737c8cff63a76b4b63531, src/dotnet-install.sh; identical to what https://dot.net/v1/dotnet-install.sh served on 2026-11-17

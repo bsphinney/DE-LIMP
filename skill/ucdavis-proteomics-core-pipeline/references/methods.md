@@ -7,9 +7,9 @@ part of a full analysis or **standalone** (just `--raw` at the facility data).
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
 - 15: What it extracts vs. defaults
-- 135: Instrument grant acknowledgments (verified 2026-06)
-- 159: Output + workflow
-- 172: 9d. The Methods section (step 9d)
+- 135: Instrument grant acknowledgments (grant numbers checked 2026-06)
+- 172: Output + workflow
+- 185: 9d. The Methods section (step 9d)
 <!-- /contents -->
 
 ## What it extracts vs. defaults
@@ -132,9 +132,22 @@ those two values (sourced as the session record) and every acquisition value bla
 `[raw file not readable here — confirm]`. `session.py finalize` does this automatically —
 see `references/deposit.md`.
 
-## Instrument grant acknowledgments (verified 2026-06)
-The acknowledgment comes from
-https://proteomics.ucdavis.edu/instrument-grant-acknowledgments.
+## Instrument grant acknowledgments (grant numbers checked 2026-06)
+The grant numbers come from
+https://proteomics.ucdavis.edu/instrument-grant-acknowledgments. That page lists the grants and
+names, not full sentences, so the sentences around the numbers are this skill's own wording.
+
+**Only for data the Core acquired.** The Core's acknowledgment is printed only when the run's
+record shows the Core acquired the data (`submission_report.core_acquisition`, one test): a
+CoreOmics submission attached to the session, or announced at init (`session.py init
+--submission`, record not attached yet), Core staff's client-work mark (`session.py
+core-client`), the Core's internal work (`session.py init --internal`), or `--acquired-at-core`.
+An instrument name that matches a Core instrument is not enough, because the skill is used by
+other labs. Without a record the Acknowledgments section holds a tagged blank, and the Core's
+LC defaults (column, emitter, column temperature, mobile phases) are tagged blanks too. A
+standalone Methods (`--raw`, no session) has no record: **the agent asks the user whether the
+Core acquired the data** and passes `--acquired-at-core` when they say yes (SKILL.md 9d). The
+reason is recorded in `<out>_params.json` `core_acquisition`.
 
 It is picked by the **instrument name** first: the name read from the raw file, or from the
 session record. The facility filename prefix (`FL`, `Ex`) is used only when the instrument is
@@ -152,7 +165,7 @@ The web page names only the timsTOF Pro 2 for the HHMI acknowledgment. Brett con
 2026-09-25 that it covers the timsTOF HT too.
 
 An instrument not in this registry yields a placeholder pointing at the source URL.
-**Grant wording must be exact** — the script cites the verified grant numbers and
+**Grant numbers must be as on the page** — the script prints the grant numbers listed there and
 links the source page; confirm the current wording there before publishing. To add
 an instrument, extend the `ACKS` table in `make_methods.py`.
 
@@ -270,6 +283,6 @@ A value in no record prints as `____ [not recorded — confirm]`, never as a gue
 are not readable where you run it, add `--instrument "<name>" --acquisition <DIA|DDA>` from the
 workflow manifest: the Methods are then written from the session record, with the acquisition
 values blank and tagged. **Verify the draft against the parameter tables and polish the prose;
-keep the acknowledgment exact** (confirm the wording at the source URL). This can also be run
+leave the grant numbers as printed** (confirm the wording at the source URL). This can also be run
 standalone — point `--raw` at facility data; no search or DE is needed. The sections above give
 the detail of each part.

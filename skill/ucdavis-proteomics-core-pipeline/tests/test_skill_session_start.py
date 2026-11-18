@@ -101,8 +101,8 @@ class SessionStart(Harness):
         declined update."""
         self.given("2.12.0", "2.13.1", hive="2.11.2")
         j = self.remote(2)
-        self.assertEqual((j["ask_update"], j["next"], j["hive"]["exit"]), (True, PUT, 3))
-        self.assertIn("Putting this computer's 2.12.0 there", j["say"])
+        self.assertEqual((j["ask_update"], j["next"], j["hive"]["exit"]), (True, None, 3))
+        self.assertIn("Putting this computer's 2.12.0 there needs your yes", j["say"])
 
     def test_reload_needed_waits_for_the_reload(self):
         self.given("2.12.0", "2.13.1", hive="2.11.2")
@@ -125,11 +125,14 @@ class SessionStart(Harness):
         self.assertEqual((j["update"]["status"], j["update"]["exit"]), ("main_unknown", 5))
 
 
-    def test_an_older_hive_copy_is_put_unasked(self):
+    def test_an_older_hive_copy_is_a_question_never_pushed_unasked(self):
+        """2.15.1: HIVE's scripts run under the user's account with the raw data and keys, so the
+        put is asked, not done: `ask` names the command, `next` is empty, exit 2."""
         self.given("2.13.1", "2.13.1", hive="2.12.0", release="2.13.1")
-        j = self.remote(3)
-        self.assertEqual((j["up_to_date"], j["ask_update"], j["ask"], j["next"]),
-                         (True, False, None, PUT))
+        j = self.remote(2)
+        self.assertEqual((j["up_to_date"], j["ask_update"], j["next"]), (True, False, None))
+        self.assertIn(PUT, j["ask"])
+        self.assertTrue(j["ask"].endswith("yes."), j["ask"])
         self.assertIn("HIVE runs skill 2.12.0", j["say"])
         self.assertEqual((j["hive"]["status"], j["hive"]["exit"]), ("hive_behind", 3))
 
@@ -199,8 +202,8 @@ class SessionStart(Harness):
         os.makedirs(os.path.dirname(sj))
         with open(sj, "w") as fh:
             fh.write('{\n  "ready_for": {"de": true},\n  "notes": []\n}\n')
-        j = self.remote(3)
-        self.assertIn("Putting this computer's 2.13.1 there.", j["say"])
+        j = self.remote(2)
+        self.assertIn("Putting this computer's 2.13.1 there needs your yes.", j["say"])
         self.assertIn("setup.sh --check", j["say"])
         # with jobs in the way the status part is the question; the note stays in `say`
         lst = self.jobs(f"python3 {self.hive_root}/scripts/record_run.py")

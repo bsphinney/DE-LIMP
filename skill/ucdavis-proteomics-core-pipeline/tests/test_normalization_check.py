@@ -682,7 +682,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         with open(os.path.join(out, "de_provenance.json")) as fh:
             prov = json.load(fh)
-        self.assertIn("no quantile step", prov["normalisation"])
+        self.assertIn("no between-run step", prov["normalisation"])
         self.assertEqual(prov["normalization_check"]["status"], "not_run")
         with open(os.path.join(out, "reproducibility_log.R")) as fh:
             self.assertNotIn("normalizeBetweenArrays", fh.read())
@@ -972,9 +972,16 @@ class TheResolvedStepIsCompared(unittest.TestCase):
 
     def test_a_2_14_2_check_is_held_to_its_requested_step_as_before(self):
         new = {"check_design": dict(MAXLFQ, status="recorded", between_run="auto")}
+        # 2.15.1 (HIVE F1): auto changed what it gives on a --no-norm report (quantile ->
+        # median_ratio), so an auto check with no recorded applied step is compared once the
+        # final DE knows its own: held to what auto gave before 2.15.1
+        # (tests/test_hivefix_2151.py has the whole table)
         dc = nc.design_check(new, dict(MAXLFQ, between_run="auto"), et.NORMALISED)
+        self.assertIsNone(dc["refusal"])
+        self.assertTrue(dc["between_run_pending"])
+        dc = nc.design_check(new, dict(MAXLFQ, between_run="auto"), et.NORMALISED,
+                             applied="none")
         self.assertEqual((dc["match"], dc["refusal"]), ("matches", None))
-        self.assertNotIn("between_run_pending", dc)
         dc = nc.design_check(new, dict(MAXLFQ, between_run="quantile"), et.NORMALISED,
                              applied="quantile")
         self.assertIsNotNone(dc["refusal"])
@@ -1054,15 +1061,16 @@ class RunDeWithA2141Check(unittest.TestCase):
         self.assertNotIn("double normalisation", flat)
         self.assertFalse(os.path.exists(os.path.join(out, "de_provenance.json")))
 
-    def test_a_sage_report_runs_its_quantile_step_and_matches(self):
+    def test_a_sage_report_is_refused_too_since_its_step_changed(self):
+        """2.15.1 (audit L2-3): a Sage report's auto step is median_ratio, no longer the quantile
+        step a 2.14.1 check drew its normalised volcano with, so that decision no longer covers
+        it: refused, told to run the check again (up to 2.15.0 this matched)."""
         p, out = self.final("sage", declared=SAGE_META)
-        self.assertEqual(p.returncode, 0, p.stderr[-3000:])
-        with open(os.path.join(out, "de_provenance.json")) as fh:
-            prov = json.load(fh)
-        self.assertEqual(prov["between_run"]["method"], "quantile")
-        self.assertEqual(prov["normalization_check"]["design_match"], "matches")
-        self.assertNotIn("between_run_pending", prov["normalization_check"])
-
+        self.assertNotEqual(p.returncode, 0)
+        flat = " ".join(p.stderr.split())
+        self.assertIn(RERUN, flat)
+        self.assertIn("--between-run auto gives median_ratio on this report", flat)
+        self.assertFalse(os.path.exists(os.path.join(out, "de_provenance.json")))
 
 if __name__ == "__main__":
     unittest.main()

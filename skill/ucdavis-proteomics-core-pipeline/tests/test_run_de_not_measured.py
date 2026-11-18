@@ -50,8 +50,8 @@ NA_COLS = ("logFC", "t", "P.Value", "adj.P.Val", "B")
 
 # 4 groups x 3 runs. P00001-P00050 in every run (P00001-P00005 up 1.5 log2 in B); P00051-P00070
 # only in C and D (6 of 12 runs: they pass maxlfq's 50% coverage filter), so in B vs A they are
-# 0/3 vs 0/3 -- and presence calls in C vs A; P00071-P00075 only in B (dpc: presence calls in
-# B vs A; maxlfq's coverage filter drops them). The Sample column makes two injections of one
+# 0/3 vs 0/3 -- and presence calls in C vs A; P00071-P00075 only in B (presence calls in B vs A;
+# maxlfq's coverage filter dropped them up to 2.15.0, its per-group rule keeps them from 2.15.1). The Sample column makes two injections of one
 # sample in every group: technical replicates.
 SYNTH_R = r'''
 set.seed(7)
@@ -88,7 +88,7 @@ write.csv(data.frame(File.Name = runs, Group = grp, Sample = smp), file.path(OUT
           row.names = FALSE)
 '''
 CD_ONLY = {f"P{i:05d}" for i in range(51, 71)}
-B_ONLY = {f"P{i:05d}" for i in range(71, 76)}      # dpc only: maxlfq's coverage filter drops them
+B_ONLY = {f"P{i:05d}" for i in range(71, 76)}      # every route from 2.15.1 (per-group coverage)
 
 
 def read_csv(path):
@@ -217,7 +217,7 @@ class NotMeasuredInEitherGroup(unittest.TestCase):
                     if key.startswith("dpc"):           # dpc tests them; maxlfq cannot (A all NA)
                         self.assertIsNotNone(num(rows[pg]["P.Value"]), pg)
                 # the B-only proteins are measured in neither C nor A
-                want = B_ONLY if key.startswith("dpc") else set()
+                want = B_ONLY                      # maxlfq too from 2.15.1 (audit L2-1)
                 self.assertEqual({pg for pg, r in rows.items() if r["Evidence"] == LABEL}, want)
                 if key.startswith("dpc"):
                     ba = {r["Protein.Group"]: r for r in self.table(key, "B.A")}
@@ -270,7 +270,7 @@ class NotMeasuredInEitherGroup(unittest.TestCase):
                     self.assertEqual(prov["significant_per_contrast"][con], sig, con)
                 self.assertEqual(prov["de_tables"]["B-A"]["n_not_measured"], len(CD_ONLY))
                 self.assertEqual(prov["de_tables"]["C-A"]["n_not_measured"],
-                                 len(B_ONLY) if method == "dpc" else 0)
+                                 len(B_ONLY))
 
     def test_methods_txt_and_make_methods_say_so(self):
         for key, _, _ in self.RUNS:
@@ -282,7 +282,7 @@ class NotMeasuredInEitherGroup(unittest.TestCase):
                 para = mm.de_paragraph(self.prov(key))
                 self.assertIn("was not tested in that contrast", para)
                 self.assertIn(f"B-A: {len(CD_ONLY)} of ", para)
-                self.assertIn(f"C-A: {len(B_ONLY) if key.startswith('dpc') else 0} of ", para)
+                self.assertIn(f"C-A: {len(B_ONLY)} of ", para)
 
     def test_the_run_log_counts_tested_proteins(self):
         p, _, _ = self.runs["dpc"]

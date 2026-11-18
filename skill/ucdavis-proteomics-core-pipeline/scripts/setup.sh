@@ -12,7 +12,8 @@
 #   - micromamba          (single static binary; only if no conda/mamba present)
 #   - a conda env with:   python + pyarrow + pyyaml + matplotlib-base (the peak check's pictures)
 #                         R (>=4.5) + bioconductor-limma + limpa >= 1.4.0 (from
-#                                   Bioconductor 3.23: bioconda has only 1.2.5)
+#                                   Bioconductor 3.23 in step 2a: bioconda's only build,
+#                                   1.2.5, cannot be solved with the limma pin)
 #                                   + r-arrow + r-dplyr + r-tidyr + r-nanoparquet
 #                         sage-proteomics            (the DDA search engine)
 #                         proteowizard/msconvert     (LINUX ONLY on bioconda)
@@ -24,7 +25,7 @@
 #   - AnnotationDbi + GO.db + org.Hs.eg.db + org.Mm.eg.db: offline GO sets for run_sets.R
 #                         (AnnotationDbi from bioconda; the annotation packages from Bioconductor's
 #                         annotation repository for the env's release; each must load; non-fatal)
-#   - .NET 8 (NETCore + AspNetCore) via ensure_dotnet8.sh, into ~/.proteomics-pipeline/dotnet8:
+#   - .NET 8 (NETCore + AspNetCore) via ensure_dotnet8.sh, into $PP_HOME/dotnet8:
 #                         DIA-NN's .raw reader and the resolution reader both run on it
 #   - google-genai >= 2.25.0 (conda-forge): the podcast's Gemini voices (make_podcast.py, step
 #                         9e) -- its own, non-fatal install
@@ -48,6 +49,8 @@
 set -uo pipefail
 
 PP_HOME="${PP_HOME:-$HOME/.proteomics-pipeline}"
+# absolute, so the conda calls below can run from inside it (in_prefix)
+mkdir -p "$PP_HOME" && PP_HOME="$(cd "$PP_HOME" && pwd)"
 ENV_NAME="proteomics-pipeline"
 MAMBA_ROOT="$PP_HOME/micromamba"
 ENV_PREFIX="$MAMBA_ROOT/envs/$ENV_NAME"
@@ -65,6 +68,25 @@ ARCH="$(uname -m)"                               # arm64 | x86_64 | aarch64
 have() { command -v "$1" >/dev/null 2>&1; }
 say()  { printf '%s\n' "$*" >&2; }
 NOTES=()
+# sha256 of what is downloaded, against the vendor's published value (verify_download.sh)
+. "$SCRIPT_DIR/verify_download.sh"
+
+# The analysis environment's versions are PINNED, not "whatever is current": two installs a month
+# apart used to be able to give different DE numbers. These are the versions the 2.15 results were
+# produced and checked with, or -- where the record names only a floor -- what bioconda/conda-forge
+# carried for R 4.5 on 2026-11-17 (every pin below has builds for osx-arm64, osx-64 and linux-64):
+#   limma 3.68.5   the limma the delivered v2 tables were reproduced with (references/environment.md)
+#   limpa 1.4.0    installed in step 2a from Bioconductor 3.23 (bioconda has only 1.2.5)
+#   statmod 1.5.1, arrow 24.0.0 (R and Python, one libarrow), sage 0.14.7 (resolve_defaults.py's pin)
+# To move to newer ones, change them HERE, re-run the tests on a real dataset, and say so in the
+# CHANGELOG. PIN_* may be overridden for a test; nothing else should.
+PIN_PYTHON="${PIN_PYTHON:-3.11}"
+PIN_LIMMA="${PIN_LIMMA:-3.68.5}"
+PIN_STATMOD="${PIN_STATMOD:-1.5.1}"
+PIN_ARROW="${PIN_ARROW:-24.0.0}"
+PIN_SAGE_CONDA="${PIN_SAGE_CONDA:-0.14.7}"
+PIN_LIMPA="${PIN_LIMPA:-1.4.0}"
+PIN_MICROMAMBA="${PIN_MICROMAMBA:-2.10.0-0}"
 
 # ---- 0. a compute node, never a cluster login node ---------------------------
 # HPC@UCD's ucd-hpc skill (mandatory on Hive, Farm and Franklin since 2026-10-16) names conda
@@ -131,14 +153,27 @@ pick_conda() {
   fi
 }
 install_micromamba() {
-  say "[setup] installing micromamba (no admin needed) for $MM_PLAT ..."
+  say "[setup] installing micromamba $PIN_MICROMAMBA (no admin needed) for $MM_PLAT ..."
   mkdir -p "$MAMBA_ROOT/bin"
-  # official endpoint streams a tarball containing bin/micromamba
-  if curl -Ls "https://micro.mamba.pm/api/micromamba/$MM_PLAT/latest" \
-       | tar -xj -C "$MAMBA_ROOT" bin/micromamba 2>/dev/null; then
+  # A PINNED release from the project's GitHub releases, checked against the sha256 GitHub shows
+  # for that asset -- not `micro.mamba.pm/.../latest` piped into tar, which ran whatever the
+  # endpoint served that day. The asset is the program itself (no archive).
+  local url="https://github.com/mamba-org/micromamba-releases/releases/download/$PIN_MICROMAMBA/micromamba-$MM_PLAT"
+  local part="$MAMBA_ROOT/bin/micromamba.part"
+  rm -f "$part"
+  if curl -fsSL "$url" -o "$part"; then
+    if verify_download "micromamba-$PIN_MICROMAMBA-$MM_PLAT" "$part" "micromamba $PIN_MICROMAMBA"; then :
+    else
+      local rc=$?
+      if [ "$rc" = 1 ]; then rm -f "$part"; NOTES+=("The micromamba download did not match its published sha256, so it was deleted and not used. Re-run setup.sh; if it happens again, install micromamba yourself: https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html")
+        return; fi
+      NOTES+=("micromamba $PIN_MICROMAMBA was downloaded but NOT verified (no pinned checksum for $MM_PLAT).")
+    fi
+    chmod +x "$part" && mv -f "$part" "$MAMBA_ROOT/bin/micromamba"
     CONDA="$MAMBA_ROOT/bin/micromamba"
     say "[setup] micromamba installed at $CONDA"
   else
+    rm -f "$part"
     NOTES+=("Could not download micromamba automatically. Install it manually: https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html  then re-run setup.sh.")
   fi
 }
@@ -149,13 +184,28 @@ if [ -z "$CONDA" ]; then
   else install_micromamba; fi
 fi
 
+# The package cache, an absolute folder under this prefix (2.15.1, HIVE F9): a user ~/.condarc
+# with a RELATIVE pkgs_dirs (HIVE, a Core admin's account: "quobyte/proteomics-grp/conda_pkgs/")
+# made micromamba create that folder under whatever directory setup.sh was run from. libmamba
+# CONCATENATES a list setting from every source (configuration_impl.hpp, Source<std::vector>::
+# merge), env first, so CONDA_PKGS_DIRS alone makes the cache absolute but cannot remove the
+# rc's entry; in_prefix runs each conda call from inside the prefix, so a relative entry
+# resolves there and never in the user's folder. A CONDA_PKGS_DIRS the user set to absolute
+# folders is kept.
+case ":${CONDA_PKGS_DIRS:-}" in
+  ":"|*:[!/]*|*,[!/]*) export CONDA_PKGS_DIRS="$MAMBA_ROOT/pkgs" ;;
+esac
+in_prefix() { mkdir -p "$MAMBA_ROOT" && ( cd "$MAMBA_ROOT" && "$@" ); }
 # create-env helper that works for micromamba OR conda/mamba
 create_env() {
-  # bioconductor-limpa here is bioconda's 1.2.5 (its only build): a floor that run_de.R can
-  # still read with (limpa_compat.R). Step 2a upgrades it to >= 1.4.0.
-  local pkgs=(python=3.11 pyarrow pyyaml matplotlib-base   # matplotlib: the peak check's pictures
-              "r-base>=4.5" bioconductor-limpa bioconductor-limma r-statmod r-data.table
-              r-nanoparquet r-arrow r-dplyr r-tidyr sage-proteomics
+  # NO bioconductor-limpa here (2.15.1 review, blocker): bioconda's only build, 1.2.5, requires
+  # bioconductor-limma >=3.66.0,<3.67.0, so it and the limma pin cannot be solved together
+  # (conda --dry-run: LibMambaUnsatisfiableError on osx-arm64 and linux-64). limpa comes from
+  # step 2a only -- Bioconductor's source package, pure R, whose Depends/Imports (limma,
+  # data.table, statmod) are all in this list. tests/test_setup_pins_2151.py keeps it so.
+  local pkgs=("python=$PIN_PYTHON" "pyarrow=$PIN_ARROW" pyyaml matplotlib-base   # matplotlib: the peak check's pictures
+              "r-base>=4.5" "bioconductor-limma=$PIN_LIMMA" "r-statmod=$PIN_STATMOD" r-data.table
+              r-nanoparquet "r-arrow=$PIN_ARROW" r-dplyr r-tidyr "sage-proteomics=$PIN_SAGE_CONDA"
               r-ggplot2 r-ggrepel r-pheatmap r-jsonlite   # publication-quality figures
               pandoc python-docx)   # pandoc + python-docx: Markdown report -> Word .docx
   # proteowizard (msconvert) is bioconda LINUX-only
@@ -171,10 +221,10 @@ create_env() {
   # defaults' r-statmod, built for R <= 4.3, and bioconductor-limma 3.66 was unsolvable.
   case "$CONDA" in
     *micromamba)
-      "$CONDA" create -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
+      in_prefix "$CONDA" create -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
         --override-channels -c conda-forge -c bioconda "${pkgs[@]}" ;;
     *)
-      "$CONDA" create -y -p "$ENV_PREFIX" \
+      in_prefix "$CONDA" create -y -p "$ENV_PREFIX" \
         --override-channels -c conda-forge -c bioconda "${pkgs[@]}" ;;
   esac
 }
@@ -185,7 +235,7 @@ env_ready() { [ -x "$ENV_PREFIX/bin/python" ] && [ -x "$ENV_PREFIX/bin/Rscript" 
 if [ -n "$CONDA" ] && ! env_ready; then
   if $CHECK_ONLY; then NOTES+=("Analysis env not built yet; run setup.sh to create it.")
   else
-    create_env || NOTES+=("Environment solve failed. Try: $CONDA create -r $MAMBA_ROOT -p $ENV_PREFIX --override-channels -c conda-forge -c bioconda bioconductor-limma sage-proteomics python pyarrow")
+    create_env || NOTES+=("Environment solve failed. Try: $CONDA create -r $MAMBA_ROOT -p $ENV_PREFIX --override-channels -c conda-forge -c bioconda bioconductor-limma=$PIN_LIMMA sage-proteomics python pyarrow")
   fi
 fi
 
@@ -201,12 +251,15 @@ fi
 # r-arrow, ... yet). An env that already has R 4.6 + Bioconductor 3.23 (HIVE's
 # proteomics-pipeline-r46) passes the same check. PROTEOMICS_LIMPA_BIOC overrides the release.
 LIMPA_MIN="1.4.0"
+LIMPA_PIN="$PIN_LIMPA"
 LIMPA_BIOC="${PROTEOMICS_LIMPA_BIOC:-3.23}"
 LIMPA_REPO="https://bioconductor.org/packages/$LIMPA_BIOC/bioc"
 limpa_ok() {
   "$ENV_PREFIX/bin/Rscript" -e "q(status = as.integer(!(requireNamespace('limpa', quietly = TRUE) && utils::packageVersion('limpa') >= '$LIMPA_MIN')))" >/dev/null 2>&1
 }
+LIMPA_JUST_INSTALLED=false
 if env_ready && ! $CHECK_ONLY && ! limpa_ok; then
+  LIMPA_JUST_INSTALLED=true
   say "[setup] installing limpa >= $LIMPA_MIN from Bioconductor $LIMPA_BIOC (bioconda has only 1.2.5)..."
   "$ENV_PREFIX/bin/Rscript" -e "install.packages('limpa', repos = c(BioCsoft = '$LIMPA_REPO', CRAN = 'https://cloud.r-project.org'), type = 'source', dependencies = NA)" >&2 \
     || say "[setup] the limpa install failed (above)"
@@ -214,6 +267,19 @@ fi
 LIMPA_VERSION=""; LIMPA_OK=false
 if env_ready; then
   LIMPA_VERSION="$("$ENV_PREFIX/bin/Rscript" -e "cat(tryCatch(as.character(utils::packageVersion('limpa')), error = function(e) ''))" 2>/dev/null)"
+  # limpa is PINNED to $LIMPA_PIN (the release the 2.15 results were produced with). The install above
+  # takes whatever Bioconductor $LIMPA_BIOC holds now; when that is another version, fetch the pinned
+  # source tarball (current release folder, then the archive) and install that one over it. If neither
+  # has it, the run goes on with what is there and says so -- limpa_version is recorded either way.
+  # Only for a limpa THIS run installed: a working env that already has a newer one is not downgraded.
+  if $LIMPA_JUST_INSTALLED && [ -n "$LIMPA_VERSION" ] && [ "$LIMPA_VERSION" != "$LIMPA_PIN" ]; then
+    say "[setup] limpa is $LIMPA_VERSION, the pinned release is $LIMPA_PIN: installing the pinned source ..."
+    "$ENV_PREFIX/bin/Rscript" -e "for (u in c('$LIMPA_REPO/src/contrib/limpa_$LIMPA_PIN.tar.gz', '$LIMPA_REPO/src/contrib/Archive/limpa/limpa_$LIMPA_PIN.tar.gz')) { ok <- tryCatch({ install.packages(u, repos = NULL, type = 'source'); as.character(utils::packageVersion('limpa')) == '$LIMPA_PIN' }, error = function(e) FALSE, warning = function(w) FALSE); if (isTRUE(ok)) break }" >&2 || true
+    LIMPA_VERSION="$("$ENV_PREFIX/bin/Rscript" -e "cat(tryCatch(as.character(utils::packageVersion('limpa')), error = function(e) ''))" 2>/dev/null)"
+  fi
+  if [ -n "$LIMPA_VERSION" ] && [ "$LIMPA_VERSION" != "$LIMPA_PIN" ]; then
+    NOTES+=("The analysis environment has limpa $LIMPA_VERSION, not the pinned $LIMPA_PIN (the release the 2.15 results were produced with). Results can differ slightly; the version is recorded with every analysis (de_provenance.json).")
+  fi
   limpa_ok && LIMPA_OK=true
 fi
 # What THIS limpa reads report.parquet with. Its own DESCRIPTION says: Suggests arrow in the 1.2.x
@@ -269,9 +335,9 @@ if [ -n "$CONDA" ] && env_ready && [ -n "$EXTRA_PKGS" ] && ! $CHECK_ONLY; then
   say "[setup] installing$EXTRA_PKGS into the env..."
   # shellcheck disable=SC2086  # $EXTRA_PKGS is meant to split into package names
   case "$CONDA" in      # -p for the reason create_env gives
-    *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
+    *micromamba) in_prefix "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" \
                    --override-channels -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
-    *)           "$CONDA" install -y -p "$ENV_PREFIX" \
+    *)           in_prefix "$CONDA" install -y -p "$ENV_PREFIX" \
                    --override-channels -c conda-forge -c bioconda $EXTRA_PKGS >&2 ;;
   esac || NOTES+=("Could not install$EXTRA_PKGS into the env (the rest of the env is unaffected). Thermo .raw needs thermorawfileparser, and reading the Orbitrap resolution needs pythonnet: see thermo_raw_reader in setup.json.")
 fi
@@ -316,9 +382,9 @@ if env_ready && ! nanoparquet_ok && ! $CHECK_ONLY; then
   if $NANOPARQUET_CONDA && [ -n "$CONDA" ]; then
     say "[setup] installing r-nanoparquet into the env (conda-forge; nothing already there changes)..."
     case "$CONDA" in
-      *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --freeze-installed \
+      *micromamba) in_prefix "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --freeze-installed \
                      --override-channels -c conda-forge -c bioconda r-nanoparquet >&2 ;;
-      *)           "$CONDA" install -y -p "$ENV_PREFIX" --freeze-installed \
+      *)           in_prefix "$CONDA" install -y -p "$ENV_PREFIX" --freeze-installed \
                      --override-channels -c conda-forge -c bioconda r-nanoparquet >&2 ;;
     esac || say "[setup] conda could not add r-nanoparquet without changing the env (above)"
   fi
@@ -455,10 +521,10 @@ if env_ready && ! $CHECK_ONLY && [ -n "$SET_ANN_MISSING" ]; then
   if ! set_ann_loads AnnotationDbi; then
     say "[setup] installing AnnotationDbi for the protein-set tests (conda)..."
     case "$CONDA" in
-      *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --override-channels \
+      *micromamba) in_prefix "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --override-channels \
                      -c conda-forge -c bioconda bioconductor-annotationdbi >&2 ;;
       "")          false ;;
-      *)           "$CONDA" install -y -p "$ENV_PREFIX" --override-channels \
+      *)           in_prefix "$CONDA" install -y -p "$ENV_PREFIX" --override-channels \
                      -c conda-forge -c bioconda bioconductor-annotationdbi >&2 ;;
     esac || say "[setup] conda could not install AnnotationDbi; trying Bioconductor's source package"
     set_ann_check
@@ -496,17 +562,19 @@ fi
 # reads .raw with no .NET step (references/install.md). activate.sh exports the root it made.
 # PROTEOMICS_ENSURE_DOTNET8 exists so the tests can stand a stub in for the download.
 ENSURE_DOTNET8="${PROTEOMICS_ENSURE_DOTNET8:-$SCRIPT_DIR/ensure_dotnet8.sh}"
-DOTNET8_ROOT=""; DOTNET8_NOTE="not run: setup.sh --check installs nothing"
+DOTNET8_ROOT=""; DOTNET8_NOTE="not run: setup.sh --check installs nothing"; DOTNET8_STATE=not_run
 if ! $CHECK_ONLY; then
   case "$OS" in
     linux|darwin)
       say "[setup] making sure .NET 8 is available (ensure_dotnet8.sh)..."
-      if DOTNET8_OUT="$("${BASH:-bash}" "$ENSURE_DOTNET8")" && [ -n "$DOTNET8_OUT" ]; then
+      # into this prefix (PP_HOME), never $HOME's default when PP_HOME is another (HIVE F5)
+      if DOTNET8_OUT="$(PROTEOMICS_PIPELINE_HOME="$PP_HOME" "${BASH:-bash}" "$ENSURE_DOTNET8")" \
+          && [ -n "$DOTNET8_OUT" ]; then
         DOTNET8_ROOT="${DOTNET8_OUT##*$'\n'}"      # its contract: the root is the LAST line
-        DOTNET8_NOTE="ensure_dotnet8.sh: .NET 8 at $DOTNET8_ROOT"
+        DOTNET8_NOTE="ensure_dotnet8.sh: .NET 8 at $DOTNET8_ROOT"; DOTNET8_STATE=ok
       else
-        DOTNET8_NOTE="ensure_dotnet8.sh could not provide .NET 8 (it needs internet the first time; its own messages are on setup.sh's stderr)"
-        NOTES+=("$DOTNET8_NOTE. Until it does, DIA-NN cannot read .raw and the Orbitrap resolution cannot be read: re-run bash setup.sh, or \`bash $ENSURE_DOTNET8\` (on a cluster both run themselves on a compute node, which on HIVE reaches Microsoft's downloads).")
+        # its note joins NOTES after the resolution reader is known (section 3, ready_for.dia_raw)
+        DOTNET8_NOTE="ensure_dotnet8.sh could not provide .NET 8 (it needs internet the first time; its own messages are on setup.sh's stderr)"; DOTNET8_STATE=failed
       fi ;;
     *) DOTNET8_NOTE="not run on $OS" ;;
   esac
@@ -551,9 +619,9 @@ esac
 if [ -n "$CONDA" ] && env_ready && ! genai_ok && ! $CHECK_ONLY; then
   say "[setup] installing google-genai >= $GENAI_MIN (the podcast's Gemini voices) into the env..."
   case "$CONDA" in      # -p for the reason create_env gives
-    *micromamba) "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --freeze-installed \
+    *micromamba) in_prefix "$CONDA" install -y -r "$MAMBA_ROOT" -p "$ENV_PREFIX" --freeze-installed \
                    --override-channels -c conda-forge -c bioconda "google-genai>=$GENAI_MIN" >&2 ;;
-    *)           "$CONDA" install -y -p "$ENV_PREFIX" --freeze-installed \
+    *)           in_prefix "$CONDA" install -y -p "$ENV_PREFIX" --freeze-installed \
                    --override-channels -c conda-forge -c bioconda "google-genai>=$GENAI_MIN" >&2 ;;
   esac || say "[setup] the google-genai install failed (above); only the podcast needs it"
   GENAI_VERSION="$(genai_version)"
@@ -644,7 +712,7 @@ MSCONVERT_NOTE="msconvert is Linux-only on bioconda (and has no vendor readers).
 
 # ---- 3b. next_steps: the fix for each thing that is not ready, for THIS platform ------------
 # setup.json next_steps {key: one sentence} and a "[setup] next:" line each at the end, so the
-# agent relays a fix instead of deriving one from ready_for. Keys de, limpa, dia, dda, thermo_raw,
+# agent relays a fix instead of deriving one from ready_for. Keys de, limpa, dia, dia_raw, dda, thermo_raw,
 # resolution_reader; a ready item has none, so all ready is {}. Each sentence says when it matters
 # and reuses the fix the notes above give (LIMPA_FIX, NANOPARQUET_FIX, DIANN_NOTE, MSCONVERT_NOTE,
 # thermo_raw_reader's own notes) -- never a second wording of it. "A cluster" is setup.sh's own
@@ -670,6 +738,27 @@ for v in (d.get("note"), ready, r.get("note")):
 $THERMO_FIELDS
 THERMO_EOF
   [ -n "$THERMO_NOTE" ] || THERMO_NOTE="thermo_raw_reader in setup.json says why"
+fi
+# ready_for.dia_raw: can DIA-NN read Thermo .raw HERE -- ONE definition, from what this file
+# records (2.15.1, HIVE F7: ready_for.dia was true beside a note that DIA-NN could not read .raw).
+# true: DIA-NN can run and ensure_dotnet8.sh gave a .NET 8 root (dotnet8.root); false: DIA-NN
+# cannot run, or ensure_dotnet8.sh failed; null: not checked (--check runs no ensure_dotnet8.sh;
+# on macOS DIA-NN runs in Docker, whose image's own .NET is not checked here). ready_for.dia
+# stays "a DIA search can run" (.d and mzML need no .NET), and a .raw search runs
+# ensure_dotnet8.sh again itself (run_search.py, diann_parallel.py).
+if ! $DIA_READY; then DIA_RAW=false
+elif [ "$OS" = "darwin" ]; then DIA_RAW=null
+elif [ "$DOTNET8_STATE" = ok ]; then DIA_RAW=true
+elif [ "$DOTNET8_STATE" = failed ]; then DIA_RAW=false
+else DIA_RAW=null
+fi
+if [ "$DOTNET8_STATE" = failed ]; then
+  # what cannot run without it, as this file records it: the resolution reader may still load a
+  # runtime it finds (thermo_raw_reader.resolution_reader.ready), and then it is not listed
+  _no_dotnet="DIA-NN cannot read .raw here (ready_for.dia_raw false; a .raw search runs ensure_dotnet8.sh again itself)"
+  [ "$RES_READY" = true ] || _no_dotnet="$_no_dotnet, and the Orbitrap resolution cannot be read"
+  NOTES+=("$DOTNET8_NOTE. Until it does, $_no_dotnet: re-run bash setup.sh, or \`bash $ENSURE_DOTNET8\` (on a cluster both run themselves on a compute node, which on HIVE reaches Microsoft's downloads).")
+  unset _no_dotnet
 fi
 NEXT_STEPS=""       # "key|sentence" lines (set_ann_status_json's form), in the order above
 next_step() { NEXT_STEPS="$NEXT_STEPS$1|$2
@@ -711,6 +800,9 @@ if ! $DDA_READY; then
   DDA_MAC=""; [ "$OS" = "darwin" ] && [ -z "$MSCONVERT" ] && DDA_MAC=" Even then, $MSCONVERT_NOTE"
   next_step dda "Only for DDA data (DIA data goes to DIA-NN instead): $DDA_MISSING not found here; run $RERUN_SETUP.$DDA_MAC"
 fi
+if [ "$DIA_RAW" = false ] && $DIA_READY; then
+  next_step dia_raw "Only for Thermo .raw input to DIA-NN (not for .d or mzML): no .NET 8 runtime >= 8.0.17 here (dotnet8.note); run $RERUN_SETUP, or bash $ENSURE_DOTNET8."
+fi
 if ! $THERMO_READY; then
   THERMO_THEN="; then bash $SCRIPT_DIR/setup.sh --check until ready_for.thermo_raw is true."
   [ -n "$THERMO_READER" ] || THERMO_THEN="."      # THERMO_UNASKED says that itself
@@ -729,9 +821,17 @@ export PATH="$ENV_PREFIX/bin:\$PATH"
 [ -f "$PP_HOME/diann_docker_image" ] && export DIANN_DOCKER_IMAGE="\$(cat "$PP_HOME/diann_docker_image")"
 # .NET 8 from ensure_dotnet8.sh (NETCore >= 8.0.17 + AspNetCore): DIA-NN 2.6 reads .raw with
 # it, and so does a framework-dependent ThermoRawFileParser. A DOTNET_ROOT already set is kept.
-_pp_dotnet="\${PROTEOMICS_DOTNET_DIR:-\$HOME/.proteomics-pipeline/dotnet8}"
-if [ -z "\${DOTNET_ROOT:-}" ] && [ -x "\$_pp_dotnet/dotnet" ]; then
-  export DOTNET_ROOT="\$_pp_dotnet"; export PATH="\$DOTNET_ROOT:\$PATH"
+# The root: \$PROTEOMICS_DOTNET_DIR when set; else the first that exists of the one
+# ensure_dotnet8.sh gave this setup (setup.json dotnet8.root), this prefix's dotnet8 and the old
+# default ~/.proteomics-pipeline/dotnet8 (ensure_dotnet8.sh's own order).
+# (a plain word list, no IFS splitting: activate.sh is also sourced from zsh)
+if [ -z "\${DOTNET_ROOT:-}" ]; then
+  for _pp_dotnet in "\${PROTEOMICS_DOTNET_DIR:-}" "$DOTNET8_ROOT" "$PP_HOME/dotnet8" "\$HOME/.proteomics-pipeline/dotnet8"; do
+    if [ -n "\$_pp_dotnet" ] && [ -x "\$_pp_dotnet/dotnet" ]; then
+      export DOTNET_ROOT="\$_pp_dotnet"; export PATH="\$DOTNET_ROOT:\$PATH"; break
+    fi
+    if [ -n "\${PROTEOMICS_DOTNET_DIR:-}" ]; then break; fi       # set: that root only
+  done
 fi
 unset _pp_dotnet
 EOF
@@ -785,9 +885,10 @@ SETUP_SKILL_VERSION="$( (. "$SCRIPT_DIR/skill_version.sh" && skill_version) 2>/d
          "$(set_ann_loads AnnotationDbi && set_ann_loads GO.db && set_ann_loads org.Hs.eg.db && echo true || echo false)" \
          "$(set_ann_loads AnnotationDbi && set_ann_loads GO.db && set_ann_loads org.Mm.eg.db && echo true || echo false)" \
          "$(j "$SET_ANN_BIOC")" "$(j "$ENV_BIOC_FROM")" "$(j "$SET_ANN_FIX")"
-  printf '  "ready_for": {"de": %s, "dia": %s, "dda": %s, "thermo_raw": %s},\n' \
+  printf '  "ready_for": {"de": %s, "dia": %s, "dia_raw": %s, "dda": %s, "thermo_raw": %s},\n' \
          "$($DE_READY && echo true || echo false)" \
          "$($DIA_READY && echo true || echo false)" \
+         "$DIA_RAW" \
          "$($DDA_READY && echo true || echo false)" \
          "$($THERMO_READY && echo true || echo false)"
   if [ -n "$THERMO_READER" ]; then printf '  "thermo_raw_reader": %s,\n' "$THERMO_READER"

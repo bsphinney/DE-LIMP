@@ -12,10 +12,10 @@ acquisition detection, same defaults, same confirmation, same FRAN handover.
 - 96: 2. Honour the exit code — this is the whole point of the gates
 - 234: 3. Organism and FASTA — still asked, never inferred
 - 248: 4. Search — the DIA-NN parallel chain, automatically
-- 275: 5. Deposit to FRAN, then tell STAN
-- 313: Deployment status
-- 326: Two ways in — and which one a Core member can actually use
-- 401: 1a. The HT steps as the pipeline runs them (step 1a)
+- 277: 5. Deposit to FRAN, then tell STAN
+- 315: Deployment status
+- 328: Two ways in — and which one a Core member can actually use
+- 410: 1a. The HT steps as the pipeline runs them (step 1a)
 <!-- /contents -->
 
 ## Why a submission is not a folder
@@ -269,8 +269,10 @@ Both are described in `references/diann_parallel.md` ("7. The chain as step 7 ru
 window MUST be pinned", "Which runs step 1b measures").
 
 Watch it with `watch_run.sh --all` (step 7b). A plate-sized array will usually lose a file
-or two to a stalled node; the documented playbook is to retry once, then drop that file and
-record it in **Data Quality Notes** rather than restarting the cohort.
+or two to a stalled node; the playbook retries a stalled file once on a fresh node. A file
+that stalls twice is **staff's decision**, never yours: stop, tell them which file, and record
+what they decide (`log_decision.py`). Never edit `file_list.txt` or a step's run list by hand
+(`references/watcher.md` "Auto-recovery playbook").
 
 ## 5. Deposit to FRAN, then tell STAN
 
@@ -361,10 +363,18 @@ looks there.
 Every other Core member gets *permission denied* at (4). That is expected, and it does not mean
 "that submission does not exist".
 
-**So everyone who is not the owner uses the HTTP path with a share token:**
+**So everyone who is not the owner uses the HTTP path with a share token.** The staff member
+saves the token on HIVE **themselves**, in their own terminal (never the chat, so it never
+passes through you; SKILL.md golden rule 11). Give them this line to run in an ssh session on
+HIVE; it waits, showing nothing, for the token to be pasted:
 
 ```
-printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0807'
+umask 077; mkdir -p ~/.stan && read -rs T && printf '%s\n' "$T" > ~/.stan/share_0807; unset T
+```
+
+Then you run:
+
+```
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0807 \
     --summary ~/core/PROT_0807/submission_summary.json --http https://ucd.stan-proteomics.org \
     --share-token-file ~/.stan/share_0807 --out ~/ht0807'
@@ -372,9 +382,9 @@ bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py 
 
 **The token goes in a file, never on a command line.** A token in argv is in the process list,
 and in `commands.log`, which the run registry copies into a folder the whole Core group can
-read. The first line above passes it through stdin (`printf` is a shell builtin, so it never
-shows in a process list either) into a mode-600 file. Do not write that line into
-`commands.log`. `--share-token <tok>` still works, with a warning, and so does `STAN_HT_SHARE_TOKEN`.
+read. The line above reads it silently and writes it with `printf` (a shell builtin, so it
+never shows in a process list either) into a mode-600 file. Never ask for the token in the
+chat, and never write that line into `commands.log`. `--share-token <tok>` still works, with a warning, and so does `STAN_HT_SHARE_TOKEN`.
 `--cookie-file` does the same for an Entra session cookie. `ht_manifest.py` masks the token,
 the cookie and the PG credential in every line it prints and in `ht_manifest.json`, whatever
 the server echoes back, in an error or in a normal reply's plates, counts and example paths.
@@ -390,9 +400,8 @@ verified live against `ucd.stan-proteomics.org`:
 > `{"detail": "High-throughput submission data requires an authorized sign-in.",
 > "login_url": "/.auth/login/aad?post_login_redirect_uri=/"}`
 
-The durable fix for the CLI path is a group-readable token under
-`/quobyte/proteomics-grp`; until then the HTTP + share-token route is what makes this
-workflow usable by the Core rather than by one person.
+So the HTTP + share-token route is what makes this workflow usable by the Core rather than
+by one person. The CLI credential stays its owner's alone (above).
 
 Less-used `ht_manifest.py` flags: `--stan <path>` (the stan binary), `--token <file>` (the STAN
 Postgres credential; or `STAN_PG_TOKEN` / `PGPASSWORD`), `--fran <url>` (the FRAN base URL for
@@ -416,18 +425,18 @@ with it, every sample on the record must have a run and every run a sample.
 **If you are not the owner of STAN's Postgres token** (mode 0600 — i.e. almost everyone),
 that fails with *permission denied*, which reads exactly like "no such submission". Use the
 hosted dashboard instead, with a per-submission share token from the HT tab — the one auth
-path that works headless. Sign-in is **Microsoft Entra, not CAS**:
+path that works headless. Sign-in is **Microsoft Entra, not CAS**. The staff member saves the
+token on HIVE themselves (the `read -rs` line in "The CLI credential" above, run in their own
+ssh session, never the chat); then:
 
 ```
-printf '%s\n' '<tok>' | bash scripts/hive_exec.sh 'umask 077; mkdir -p ~/.stan && cat > ~/.stan/share_0807'
 bash scripts/hive_exec.sh 'python3 ~/proteomics-pipeline/scripts/ht_manifest.py fetch 0807 \
     --summary ~/core/PROT_0807/submission_summary.json --http https://ucd.stan-proteomics.org \
     --share-token-file ~/.stan/share_0807 --out ~/ht0807'
 ```
 
-The token goes into a mode-600 file on HIVE through stdin, and the search reads it from
-there. **Never put it on a command line or in `commands.log`**, and don't log the `printf` line
-above. The run registry copies `commands.log` into a folder the whole Core can read, and a
+The token sits in a mode-600 file on HIVE, and the search reads it from there. **Never ask
+for it, never put it on a command line or in `commands.log`.** The run registry copies `commands.log` into a folder the whole Core can read, and a
 token on a command line is in the process list too. `ht_manifest.py` masks the token in
 everything it prints.
 Writes `files.txt` (absolute resolved paths → feed to `--raw`/`--files`; **only the runs named

@@ -241,7 +241,7 @@ class CheckHive(Harness):
         j = self.check(3)
         self.assertEqual((j["status"], j["hive"], j["next"]), ("hive_missing", None, PUT))
         self.assertIn("unknown", j["say"])
-        self.assertIn("Putting this computer's 2.9.0 there", j["say"])
+        self.assertIn("Putting this computer's 2.9.0 there needs your yes", j["say"])
 
     def test_no_copy_on_hive_at_all(self):
         self.plugin(self.laptop, "2.9.0")
@@ -305,14 +305,15 @@ class CheckHive(Harness):
         self.assertEqual(self.check(3)["status"], "hive_differs")
 
     def test_files_an_older_put_left_on_hive_do_not_count(self):
-        """--put-skill never deletes: a script this copy no longer has stays on HIVE forever."""
+        """A script this copy no longer has (left by an older put, or HIVE's __pycache__) is not
+        compared; --put-skill removes it (2.15.1: rsync --delete inside the copy's folders)."""
         self.plugin(self.laptop, "2.9.0")
         self.hive_copy("2.9.0")
         open(os.path.join(self.hive_root, "scripts", "retired_script.py"), "w").close()
         os.makedirs(os.path.join(self.hive_root, "scripts", "__pycache__"))
         self.assertEqual(self.check(0)["status"], "in_step")
 
-    def test_running_jobs_that_use_the_copy_stop_an_automatic_put(self):
+    def test_running_jobs_that_use_the_copy_stop_a_put(self):
         """Job-end hooks run ~/proteomics-pipeline/scripts hours later: never swap them."""
         self.plugin(self.laptop, "2.9.0")
         self.hive_copy("2.6.0")

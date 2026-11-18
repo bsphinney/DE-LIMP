@@ -8,12 +8,12 @@ fact comes from: `protein-card-sources.md`.
 **Contents** (section: line)
 - 19: 8g. Screen data for "show me the data" (limpa analyses)
 - 67: Which analyses part 1 covers
-- 98: Show me the data for <protein>
-- 143: What the folder holds
-- 155: The protein record
-- 168: How the page is built
-- 180: What is not in part 1, and why
-- 190: The CPU-family rule
+- 100: Show me the data for <protein>
+- 145: What the folder holds
+- 157: The protein record
+- 170: How the page is built
+- 182: What is not in part 1, and why
+- 192: The CPU-family rule
 <!-- /contents -->
 
 ## 8g. Screen data for "show me the data" (limpa analyses)
@@ -82,6 +82,8 @@ DIA-NN's precursor rows.
 | `maxlfq` | DIA-NN `PG.MaxLFQ` + limma | refused (part 5) |
 | `engine_protein` | an engine's own protein quantity + limma: FragPipe IonQuant MaxLFQ, the skill's directLFQ, AlphaDIA, Radiant | refused (part 5) |
 | `peptide_max` | Sage: highest peptide per protein and run + limma | refused (part 5) |
+| `peptide_medpolish` | a peptide-level adapted report (Sage's): Tukey median polish of its peptides per protein and run + limma (2.15.1) | refused (part 5) |
+| `undeclared_pg_maxlfq` | a report with a `PG.MaxLFQ` column that declares no quantity and is not shaped like DIA-NN's: used as given, its origin NOT RECORDED [confirm] (2.15.1) | refused (part 5) |
 | SILAC (`run_silac.R`) | ratios | refused: its record is not `run_de.R`'s limpa record (part 5) |
 
 A refusal never leaves a half page: `make_protein_screen.py` reads `supported: false` and stops with the

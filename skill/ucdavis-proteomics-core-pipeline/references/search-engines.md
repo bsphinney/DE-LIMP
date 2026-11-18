@@ -8,20 +8,20 @@ DE-input contract.
 - 27: Acquisition detection (`detect_acquisition.py`)
 - 199: Parameters
 - 204: Routing
-- 214: Licensing — pick a commercial-OK engine for non-academic users
-- 227: Public program sources (anyone, any OS — cite these for non-Core / external users)
-- 250: Per-engine invocation & output adapter (`run_search.py`)
-- 1027: Finishing a FAIMS-split session
-- 1047: The adapters are the test surface
-- 1054: Less-used flags
-- 1073: 2. Detect acquisition + instrument (step 2)
-- 1173: 4a. DIA: the three routes (step 4a)
-- 1211: 4c. DDA: the routes (step 4c)
-- 1293: 7. Running the search: the command, `--` paths, keratin (step 7)
-- 1329: 7. Radiant + Fulcrum in the pipeline (step 7)
-- 1371: 7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)
-- 1404: 7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)
-- 1462: 7. After submitting: the DE contract and the conversation (step 7)
+- 214: Licensing — ask at step 3, before the one confirmation
+- 231: Public program sources (anyone, any OS — cite these for non-Core / external users)
+- 254: Per-engine invocation & output adapter (`run_search.py`)
+- 1046: Finishing a FAIMS-split session
+- 1066: The adapters are the test surface
+- 1072: Less-used flags
+- 1091: 2. Detect acquisition + instrument (step 2)
+- 1192: 4a. DIA: the three routes (step 4a)
+- 1230: 4c. DDA: the routes (step 4c)
+- 1312: 7. Running the search: the command, `--` paths, keratin (step 7)
+- 1348: 7. Radiant + Fulcrum in the pipeline (step 7)
+- 1390: 7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)
+- 1416: 7. On a cluster: submitting, Sage conversion and the LFQ gate (step 7)
+- 1474: 7. After submitting: the DE contract and the conversation (step 7)
 <!-- /contents -->
 
 ## Acquisition detection (`detect_acquisition.py`)
@@ -211,18 +211,22 @@ and other DDA → Sage, FragPipe when it is asked for.** `--engine` overrides
 and is never swapped; the bundle's `engine.name` is authoritative when present. The DDA routes
 in full: "4c." below.
 
-## Licensing — pick a commercial-OK engine for non-academic users
+## Licensing — ask at step 3, before the one confirmation
 
 | Engine | License | Commercial use | Notes |
 |---|---|---|---|
 | **DIA-NN** (Academia build) | academic / non-profit only | ❌ **no** | the free build the skill downloads is academic-only |
-| **AlphaDIA** | Apache-2.0 | ✅ yes | open-source DIA alternative; deep-learning, **GPU recommended** |
-| **Sage** | MIT | ✅ yes | fast, CPU; DDA + wide-window DIA |
+| **Sage** | MIT | ✅ yes | fast, CPU; DDA, and Orbitrap wide-window DIA on request (`--engine sage`); a quantifying search of timsTOF dia-PASEF is refused |
 | **FragPipe** (MSFragger/IonQuant) | license-gated | depends | requires the user's own license |
+| **Radiant** | Apache-2.0 + Commons Clause + grant-back | restricted | state the licence (step 4a); do not advise on it |
 
-**For commercial / non-academic DIA users, route to AlphaDIA** (`--engine alphadia`)
-instead of DIA-NN — same job, no license problem. Ask "academic or commercial?" before
-a DIA run if it isn't already clear.
+**Ask "Is this academic/non-profit, or commercial?" at step 3**, before the compute
+confirmation and before step 5 downloads anything. **The skill has no commercial-use DIA
+route that equals DIA-NN.** AlphaDIA is not a skill route: steps 4 and 6b refuse it
+(`resolve_defaults.py` and `estimate_params.py` know no `alphadia`). For a commercial DIA
+user, say so plainly and let them choose: their own commercial DIA-NN licence, a FragPipe
+licence, or (Orbitrap only) Sage on request, which is not the DIA-NN default and is said so.
+Never run the academic DIA-NN build for them.
 
 ## Public program sources (anyone, any OS — cite these for non-Core / external users)
 
@@ -474,7 +478,7 @@ adds rescoring, FDR, protein inference and directLFQ rollup. Third of the three 
 routes; **default to DIA-NN** unless the user asks for this one.
 
 ```
-python3 scripts/run_search.py ... --engine radiant --params ./wf/default.radiantConfig
+python3 scripts/run_search.py ... --engine radiant --params ./wf/radiant.radiantConfig
 ```
 
 Everything below was verified against `seerbio/radiant-fulcrum:2.3.3` and the
@@ -569,9 +573,10 @@ of part-files at `<results>/fulcrum-results`, not a single file. `adapt_radiant`
 reads it as a dataset, collapses PSM-level rows to one protein×run (max intensity,
 best q-value), and writes the usual `report.parquet`.
 
-### AlphaDIA (commercial-OK DIA; adapter required)
+### AlphaDIA (not a skill route)
 
-Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Library-free:
+Steps 4 and 6b refuse `--engine alphadia`, so no confirmed analysis reaches this; the adapter
+below stays in `run_search.py` for maintainers. Never offer it to a user. Apache-2.0. Library-free:
 ```
 <cmd> -o <out> -f <raw> [-f ...] --fasta <fasta> [-c <config.yaml>]
 ```
@@ -585,8 +590,8 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
   data the first time.
 - **⚠ Limitation — timsTOF whole-proteome directDIA:** AlphaDIA does **not** work on
   **timsTOF** `.d` for **whole-proteome library-free (directDIA)** searches. For that
-  case it is not a valid substitute for DIA-NN. Options: academic → DIA-NN; commercial →
-  run AlphaDIA **library-based** (a predicted/empirical spectral library, `--library`)
+  case it is not a valid substitute for DIA-NN. For maintainers testing it (never offered to a
+  user): run AlphaDIA **library-based** (a predicted/empirical spectral library, `--library`)
   instead of directDIA, or use Sage. Non-timsTOF instruments and library-based timsTOF
   runs are unaffected.
 
@@ -610,7 +615,7 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
      - **Identifications only** (`quant.lfq` false, written by `estimate_params.py
        --ids-only`): Sage 0.14.7 reads the `.d` itself. On a Core submission's two timsTOF HT
        DDA-PASEF runs (HIVE, 2026-10-30) that gave 896 peptides at 1% in 22 s, against 753
-       from an 11.6 GB Windows msconvert mzML (`sage015_test/RESULTS.md`, arm B). A `.raw`
+       from an 11.6 GB Windows msconvert mzML. A `.raw`
        beside it is still converted, and an mzML goes in as it is.
      - **Quantification** (a cfg written without `--ids-only`; which one a study gets is the
        rule in `references/no-de-route.md`, step 1): 0.14.7 has no MS1 quantification on a `.d`, so the
@@ -706,9 +711,24 @@ Apache-2.0 — the open-source alternative to DIA-NN for non-academic users. Lib
      `sage_adapt`. The contract's q-columns are then 0.0, and the report declares them
      placeholders (`q_columns: placeholder`), so the DE applies no second threshold and
      says so.
-   - **Before 2.9 decoys and failing rows went through** (`docs/SKILL_OPEN_DEFECTS.md`).
-   - v0.14.x has no native protein grouping, and the skill ships no post-hoc grouping script (the
-     protein level of a Sage search is not grouped by the skill). v0.15+ has IDPicker grouping.
+   - Protein level (2.15.1): v0.14.x has no native protein grouping (v0.15+ has IDPicker
+     grouping). The adapter keeps protein groups at Sage's picked-protein q-value <= 0.01
+     (`protein_q`; an older Sage without the column: nothing filtered, and the record and
+     Methods say so) and groups proteins by parsimony (`run_search.SAGE_SHARED_RULE`):
+     indistinguishable proteins are one group, a subset protein is listed in its superset's
+     group, and a peptide still shared is a razor peptide of the group with the most peptides;
+     a group left with no peptide is named in `sage_groups_not_quantified.csv` (beside the
+     report, delivered with the search output: one row per group, with the groups its peptides
+     went to) and in `sage_adapt.json`. Details: de-analysis.md "`--method
+     maxlfq` (MaxLFQ + limma) — use with Sage/FragPipe (or DIA-NN MaxLFQ)".
+   - **The version Sage prints is not always the release.** The v0.14.7 release (and bioconda's
+     `sage-proteomics` 0.14.7, built from that tag) prints `sage 0.14.6` for `sage --version`
+     and writes `"version": "0.14.6"` in `results.json`: its `crates/sage-cli/Cargo.toml` still
+     says 0.14.6 at tag v0.14.7 (an upstream labelling bug, checked 2026-11-17). The skill
+     records the release from the release tarball or the conda package record
+     (`acquire_tools.sh` `sage_conda_version`; tools.json `versions.sage`), and the Methods use
+     that. The binary's own string is kept beside it, under a name that says what it is
+     (`versions.txt` `sage_self_reported_version`).
 
 ### FragPipe + diaTracer — spectrum-centric DIA (timsTOF dia-PASEF)
 
@@ -875,17 +895,16 @@ the DIA-NN bundled with the same install (FragPipe 24.0: 1.8.2 Beta 8), and read
 settings folder of its own (`<out>/fragpipe_settings/job_<id>`), so neither the account's
 FragPipe cache nor `fragpipe_bootstrap.py --diann` changes which DIA-NN quantifies. The skill
 has no route that points FragPipe at a DIA-NN 2.x: in a FragPipe-vs-DIA-NN comparison the
-version gap (1.8.2 Beta 8 against the 2.x the `diann_*` workflows pin) cannot be removed, only
+version gap (1.8.2 Beta 8 against the 2.x the skill's DIA-NN route pins) cannot be removed, only
 stated. A FragPipe run by hand against a 2.x is outside the skill, and the user's call,
 because the DIA-NN 2.x licence adds: *"Usage of DIA-NN in the cloud or
 on any computer setups that are not in your immediate possession is only permitted under
 Collaborative use."* A shared cluster is arguably not "in your immediate possession". The
-bundled 1.8.2 Beta 8 carries no such clause. This clause is **also worth knowing for the
-`diann_*` workflows**, which pin DIA-NN 2.x and are routinely run on a shared HPC — flag it
-to the user rather than deciding for them.
+bundled 1.8.2 Beta 8 carries no such clause. The skill's own DIA-NN route pins 2.x and runs
+on a shared cluster too: the clause is told to the user at step 3 ("7. Licensing" below).
 
 **Comparing it against DIA-NN.** That is the point of having both — `compare_searches.py`
-(SKILL.md step 11a). FragPipe bundles DIA-NN 1.8.2 Beta 8 while the `diann_*` workflows pin
+(SKILL.md step 11a). FragPipe bundles DIA-NN 1.8.2 Beta 8 while the skill's DIA-NN route pins
 2.x, so part of any difference is engine version rather than the spectrum-centric approach.
 Say so rather than crediting it all to the method.
 
@@ -1047,8 +1066,7 @@ Not exercised end to end on a real mixed set in 2.15: relay anything that does n
 ## The adapters are the test surface
 
 DIA-NN's path is fully wired and native. The **Sage and FragPipe → DE-contract
-adapters are the part that needs real-data validation** (flagged in each
-workflow's `VALIDATION.md`). Verify the protein×run matrix shape and that
+adapters are the part that needs real-data validation**. Verify the protein×run matrix shape and that
 intensities are in the expected (linear, pre-log) scale before trusting DE output.
 
 ## Less-used flags
@@ -1103,7 +1121,8 @@ zip) needs .NET 8 with **both** Microsoft.NETCore.App and Microsoft.AspNetCore.A
 script finds an install that has both and hands it to the parser itself — **don't export
 DOTNET_ROOT for step 2**. If none has both, it prints one `ERROR: … cannot start` up front
 and reads nothing (every `.raw` comes back `unknown` with that reason): run `bash
-scripts/ensure_dotnet8.sh` (installs both into `~/.proteomics-pipeline/dotnet8`; needs
+scripts/ensure_dotnet8.sh` (installs both into `$PROTEOMICS_PIPELINE_HOME/dotnet8`, default
+`~/.proteomics-pipeline/dotnet8`; needs
 internet; on a cluster login node its download runs itself on a compute node), and re-run
 step 2; or on HIVE load the module inside step 2's own job: `bash scripts/hive_exec.sh --job …
 'module load dotnet-core-sdk/8.0.4 && python3 ~/proteomics-pipeline/scripts/detect_acquisition.py
@@ -1331,7 +1350,7 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
 - **Radiant + Fulcrum (Thermo Orbitrap DIA).** Add `--engine radiant`:
   ```
   python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
-      --bundle ./wf/workflow.manifest.json --params ./wf/default.radiantConfig \
+      --bundle ./wf/workflow.manifest.json --params ./wf/radiant.radiantConfig \
       --fasta ./search.fasta --out ./search_out --files /path/to/*.raw \
       --engine radiant --threads 16
   ```
@@ -1370,19 +1389,12 @@ python3 scripts/run_search.py --tools ~/.proteomics-pipeline/tools/tools.json \
 
 ## 7. Licensing, AlphaDIA, chromatograms and DIA-NN settings (step 7)
 
-- **⚠ DIA-NN licensing (ask before a DIA run):** DIA-NN's free "Academia" build is
-  licensed for **academic / non-profit use only**. If the user is in a **commercial /
-  non-academic** setting, do NOT use DIA-NN — **offer AlphaDIA** (`--engine alphadia`,
-  Apache-2.0, commercial-OK; the open-source DIA alternative) or Sage (MIT, also
-  commercial-OK). A quick question: *"Is this academic/non-profit, or commercial?"* —
-  commercial → AlphaDIA. (AlphaDIA is deep-learning based; a GPU is strongly
-  recommended — best on a HIVE GPU node or a GPU workstation.)
-- **⚠ AlphaDIA limitation — timsTOF whole-proteome directDIA:** AlphaDIA does **not**
-  work on **timsTOF** `.d` files for **whole-proteome library-free (directDIA)**
-  searches. So for timsTOF + whole-proteome + library-free, AlphaDIA is NOT an option.
-  In that case: academic → DIA-NN; commercial → use a **spectral-library** approach
-  (predicted/empirical library) rather than directDIA, or Sage — and tell the user the
-  constraint. (Non-timsTOF instruments, or library-based timsTOF runs, are fine for AlphaDIA.)
+- **⚠ DIA-NN licensing is asked at step 3**, before the confirmation ("Licensing" above). DIA-NN's
+  free "Academia" build is licensed for **academic / non-profit use only**; a commercial user
+  gets the options listed there, and AlphaDIA is not one of them (not a skill route). DIA-NN
+  2.x's licence also says: *"Usage of DIA-NN in the cloud or on any computer setups that are
+  not in your immediate possession is only permitted under Collaborative use."* A shared
+  cluster such as HIVE may fall under it: tell the user in one line, never decide it for them.
 - **Every DIA-NN search extracts chromatograms — this is not optional.** `run_search.py`
   forces `--xic 10 --mobilograms` into the cfg if it isn't already there (writing an
   augmented copy to `<out>/params_with_xic.cfg`; your file is never edited). XICs are what

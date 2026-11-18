@@ -82,13 +82,21 @@ class TheRoutes(unittest.TestCase):
 
 class Step7(unittest.TestCase):
     def test_the_commercial_clause_points_at_alphadias_limit(self):
-        """M3: AlphaDIA does not work on timsTOF whole-proteome directDIA."""
+        """M3: AlphaDIA does not work on timsTOF whole-proteome directDIA. 2.15.1 (audit M1/M2):
+        the licence question moved to step 3, before the one confirmation, and AlphaDIA is no
+        longer offered to a commercial user (steps 4 and 6b refuse it)."""
+        s3 = step("\n### 3. Ask organism", "\n### 3b. ")
+        self.assertIn('"Academic/non-profit, or commercial?"', s3)
+        self.assertIn('search-engines.md "Licensing"', s3)
         s7 = step("\n### 7. Run the search", "\n### 7b. ")
-        self.assertIn('(commercial: search-engines.md "7. Licensing")', s7)
-        self.assertNotIn("commercial → AlphaDIA", s7)
+        for part in (s3, s7):
+            self.assertNotIn("commercial → AlphaDIA", part)
         lic = section("search-engines.md", "## 7. Licensing, AlphaDIA, chromatograms")
-        self.assertIn("directDIA", lic)
-        self.assertIn("timsTOF", lic)
+        self.assertIn("not a skill route", lic)
+        self.assertNotIn("offer AlphaDIA", lic)
+        alpha = section("search-engines.md", "### AlphaDIA (not a skill route)")
+        self.assertIn("directDIA", alpha)
+        self.assertIn("timsTOF", alpha)
 
 
 class TheMidAnalysisRechecks(unittest.TestCase):

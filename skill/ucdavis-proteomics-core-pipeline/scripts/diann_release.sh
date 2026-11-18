@@ -27,9 +27,39 @@
 # -- the skill pins 2.x.
 # =============================================================================
 
+# gh_fetch <api url>: the body of a GitHub API answer on stdout, return 0. On any failure it
+# prints nothing, returns 1, and writes the REASON to $GH_ERR_FILE when the caller set one --
+# "GitHub could not be reached (curl exit 6)" or "GitHub answered HTTP 403 (a rate limit:
+# 60 requests an hour per address without a token; set GITHUB_TOKEN)" -- because the callers
+# used to send errors to /dev/null and then say "no build named X exists", which sends the
+# reader looking for a wrong version when the network is the problem. GITHUB_TOKEN, when set,
+# is sent to api.github.com only.
+gh_fetch() {
+  local url="$1" tmp code rc=0
+  tmp="$(mktemp)" || return 1
+  if [ -n "${GITHUB_TOKEN:-}" ] && [ "${url#https://api.github.com/}" != "$url" ]; then
+    code="$(curl -sSL -H "Authorization: Bearer $GITHUB_TOKEN" -w '%{http_code}' -o "$tmp" "$url" 2>/dev/null)" || rc=$?
+  else
+    code="$(curl -sSL -w '%{http_code}' -o "$tmp" "$url" 2>/dev/null)" || rc=$?
+  fi
+  if [ "$rc" != 0 ]; then
+    [ -n "${GH_ERR_FILE:-}" ] && printf 'GitHub could not be reached (curl exit %s) -- a network problem, not a missing version' "$rc" > "$GH_ERR_FILE"
+    rm -f "$tmp"; return 1
+  fi
+  case "$code" in
+    2??) cat "$tmp"; rm -f "$tmp"; return 0 ;;
+    403|429) [ -n "${GH_ERR_FILE:-}" ] && printf 'GitHub answered HTTP %s -- most likely its rate limit (60 requests an hour per address without a token; set GITHUB_TOKEN, or wait) -- not a missing version' "$code" > "$GH_ERR_FILE" ;;
+    404) [ -n "${GH_ERR_FILE:-}" ] && printf 'GitHub answered HTTP 404 -- that release or tag does not exist' > "$GH_ERR_FILE" ;;
+    *)   [ -n "${GH_ERR_FILE:-}" ] && printf 'GitHub answered HTTP %s' "$code" > "$GH_ERR_FILE" ;;
+  esac
+  rm -f "$tmp"; return 1
+}
+
 # All Academia asset URLs across every release, one per line.
 diann_release_assets() {
-  curl -fsSL "https://api.github.com/repos/vdemichev/DiaNN/releases?per_page=100" 2>/dev/null \
+  local body
+  body="$(gh_fetch "https://api.github.com/repos/vdemichev/DiaNN/releases?per_page=100")" || return 0
+  printf '%s\n' "$body" \
     | grep '"browser_download_url"' \
     | sed -E 's/.*"(https[^"]+)".*/\1/'
 }

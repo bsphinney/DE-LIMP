@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """A Sage DE describes the quantification it actually did (architectural rule 1).
 
-adapt_sage writes one row per PEPTIDE x run; build_maxlfq.R then takes max(PG.MaxLFQ) per protein
-and run -- the single most intense peptide. Until 2.9 every Sage DE was nonetheless described
+adapt_sage writes one row per PEPTIDE x run; build_maxlfq.R then rolls them up per protein and run
+(the single most intense peptide up to 2.15.0; Tukey's median polish of the peptides from 2.15.1). Until 2.9 every Sage DE was nonetheless described
 as "MaxLFQ + limma" / "DIA-NN PG.MaxLFQ" / "Quantification: DIA-NN MaxLFQ (Demichev et al. 2020)"
 in methods.txt, de_provenance.json, the Methods, the AI brief and the reproducibility log.
 
@@ -118,7 +118,7 @@ class SageDeDescribesItself(unittest.TestCase):
         with open(os.path.join(self.out, "methods.txt")) as fh:
             text = fh.read()
         self.assertClean(text, "methods.txt")
-        self.assertIn("highest Sage 0.14.6 per its results.json", text)
+        self.assertIn("median polish of the log2 Sage 0.14.6 per its results.json", text)
         # placeholder q-columns: no bare numeric cutoff, and the filter line says it kept all
         self.assertNotIn("ID FDR cutoff", text)
         self.assertIn("placeholder q-value columns", text)
@@ -128,8 +128,8 @@ class SageDeDescribesItself(unittest.TestCase):
 
     def test_the_provenance_record_says_what_was_done(self):
         prov = self.prov()
-        self.assertEqual(prov["pipeline_id"], "peptide_max")
-        self.assertIn("highest", prov["rollup_method"])
+        self.assertEqual(prov["pipeline_id"], "peptide_medpolish")     # 2.15.1 (audit L2-4)
+        self.assertIn("median polish", prov["rollup_method"])
         self.assertTrue(prov["caveat"])
         self.assertEqual(prov["declared_quantity"]["level"], "peptide")
         # Everything the record says about the pipeline. The contaminant block is left out on
@@ -143,9 +143,9 @@ class SageDeDescribesItself(unittest.TestCase):
         prov = self.prov()
         para = make_methods.de_paragraph(prov)
         self.assertClean(para, "make_methods.de_paragraph")
-        self.assertIn("Highest-peptide intensity + limma", para)
+        self.assertIn("Peptide median polish + limma", para)
         self.assertIn("Sage's own FDR", para)
-        self.assertTrue(prov["plain_language"].startswith("**Highest-peptide intensity"))
+        self.assertTrue(prov["plain_language"].startswith("**Peptide median polish"))
         self.assertClean(prov["plain_language"], "plain_language")
 
     def test_the_ai_brief_explains_the_pipeline_it_ran(self):
@@ -156,7 +156,7 @@ class SageDeDescribesItself(unittest.TestCase):
                            capture_output=True, text=True, cwd=self.tmp, timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr[-1500:])
         text = open(brief, encoding="utf-8").read()
-        self.assertIn("**Highest-peptide intensity + limma**", text)
+        self.assertIn("**Peptide median polish + limma**", text)
         self.assertNotIn("MaxLFQ reconstructs protein quantities", text)
         self.assertClean(text, "the AI brief")
 
@@ -168,7 +168,7 @@ class SageDeDescribesItself(unittest.TestCase):
             comments = [ln for ln in fh if ln.lstrip().startswith("#")]
         text = "".join(comments).replace("PG.MaxLFQ", "<column>")   # the contract column's NAME
         self.assertClean(text, "reproducibility_log.R comments")
-        self.assertIn("highest Sage", text)
+        self.assertIn("median polish", text)
 
     def test_audit_carries_the_caveat(self):
         audit = os.path.join(self.tmp, "AUDIT.md")
@@ -177,7 +177,7 @@ class SageDeDescribesItself(unittest.TestCase):
                        timeout=120, check=True)
         text = open(audit).read()
         self.assertIn("⚠️ **quantification**", text)
-        self.assertIn("single most intense peptide", text)
+        self.assertIn("median polish", text)
 
 
 @unittest.skipUnless(r_has(*NEEDS), "needs R with " + "/".join(NEEDS))

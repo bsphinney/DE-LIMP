@@ -47,6 +47,7 @@ import make_podcast       # noqa: E402  -- an optional audio discussion keeps it
 from client_text import draft_history, draft_history_loose  # noqa: E402  -- the ONE list (podcast too)
 from client_text import peak_check_overclaims, peak_check_overclaims_loose  # noqa: E402  -- "confirmed by Skyline"
 import skyline_peaks      # noqa: E402  -- the peak check's section (step 8f), from its own record
+from ai_agent import agent_label  # noqa: E402  -- the ONE name for the AI that ran the skill
 import audit_results      # noqa: E402  -- the audit's plain words: the client's Audit & caveats
 from session import database_organisms  # noqa: E402  -- the one organism line (every species)
 from session_docs import IP_CONTROL_NAME  # noqa: E402  -- which groups are pull-down controls
@@ -1020,6 +1021,25 @@ def _skill_version():
     return None if v == sv.UNKNOWN else v
 
 
+REVIEW_LENS = {"proteomics": "proteomics", "biology": "biology", "statistics": "statistics"}
+
+
+def reviews_on_record(session):
+    """The expert-review lenses with a non-empty logs/review_<lens>.md in the session, in the
+    order of REVIEW_LENS. [] with no session or no such file."""
+    if not session:
+        return []
+    base = os.path.join(os.path.expanduser(session), "logs")
+    out = []
+    for k in REVIEW_LENS:
+        try:
+            if os.path.getsize(os.path.join(base, f"review_{k}.md")) > 0:
+                out.append(k)
+        except OSError:
+            pass
+    return out
+
+
 def how_made(a, prov, md_text, report_secs):
     """"How this report was made", in plain words for the lab: the software that made the
     numbers, Claude running the pipeline (and writing the text, when there is an AI-written
@@ -1059,15 +1079,22 @@ def how_made(a, prov, md_text, report_secs):
     v = _skill_version()                  # the version building this page
     ran = prov.get("skill_version")       # the version that ran the DE (run_de.R records it)
     ran = ran if isinstance(ran, str) and ran.strip() and not ran.startswith("(unknown") else None
-    p2 = ("Claude, Anthropic's AI model, ran each step, following the UC Davis Proteomics Core's "
+    p2 = (f"{agent_label(a.session)} ran each step, following the UC Davis Proteomics Core's "
           "pipeline" + (f" (skill {ran})" if ran else "")
           + (", and wrote this report's analysis text" if md_text is not None else "") + "."
           # a page built by another version than the DE's, or a DE from before the record named one
           + (f" This report was built with skill {v}." if v and v != ran else ""))
     outdir = os.path.dirname(os.path.abspath(a.out))
     exp = next((t for t, _ in report_secs if "expert review" in norm_title(t)), None)
-    p4 = (f"Separate Claude reviewers — a proteomics expert, a biologist and a statistician — "
-          f"checked the analysis; their notes are in the {exp} section." if exp else "")
+    # Only the reviews whose notes are on record (logs/review_<lens>.md, non-empty): the section's
+    # title alone does not show that a reviewer ran (2.15.1, audit lane 3 #7).
+    ran_reviews = reviews_on_record(a.session)
+    p4 = ""
+    if exp and ran_reviews:
+        names = [REVIEW_LENS[k] for k in ran_reviews]
+        what = (", ".join(names[:-1]) + " and " + names[-1]) if len(names) > 1 else names[0]
+        p4 = (f"{len(names)} separate AI review pass{'es' if len(names) > 1 else ''} ({what}) "
+              f"checked the analysis; their notes are in the {exp} section.")
     mp = make_podcast
     return ([("raw", mp.HOWMADE_START, mp.HOWMADE_START),
              ("md", "\n\n".join(p.strip() for p in (p1, p2) if p.strip())),
@@ -1216,10 +1243,11 @@ def glance_data(prov, tables, tables_dir, session=None):
     notes = [n for n in (search_measurement_note(prov, session), first_pass_note(prov, session),
                          identifications_only_note(prov, session),
                          protein_fdr_note(prov, session), semi_specific_note(prov, session),
+                         route_status_note(prov, session),
                          search_inputs_note(prov, session),
                          runs_left_out_note(prov),
                          added_sequences_note(session), inferred_note(prov, tables_dir),
-                         not_measured_note(prov),
+                         not_measured_note(prov), onoff_note(prov), incomplete_note(prov), quantums_note(prov),
                          database_note(prov, tables_dir, session), keratin_note(prov),
                          covariate_note(prov))
              if n]
@@ -1292,6 +1320,81 @@ def not_measured_note(prov):
                      f"*{rec.get('label') or 'not recorded'}*, and it is left out of that comparison's "
                      f"multiple-testing correction and of the counts of tested proteins here. "
                      + "; ".join(f"{contrast_label(c)} {n:,}" for c, n in per) + ".")}
+
+
+def onoff_note(prov):
+    """The fixed on/off callout, from run_de.R's `onoff` record (MaxLFQ route): proteins detected
+    in one group of a comparison and in none of the other have no fold change, so they are listed
+    in OnOff_Proteins.csv, never in the DE results. The rule's words are the record's own. None
+    when the record has none (limpa), or it found nothing and nothing failed or was skipped."""
+    rec = prov.get("onoff") if isinstance(prov.get("onoff"), dict) else None
+    if not rec:
+        return None
+    file = rec.get("file") or "OnOff_Proteins.csv"
+    if rec.get("status") == "failed":
+        return {"kind": "warning", "title": "The on/off protein list could not be made",
+                "text": (f"Proteins seen in one group only have no fold change and would be "
+                         f"missing from this report. `{file}` was not written: "
+                         f"{rec.get('reason') or 'no reason recorded'}.")}
+    con = rec.get("contrasts") if isinstance(rec.get("contrasts"), dict) else {}
+    per = [(c, t.get("n_onoff")) for c, t in con.items()
+           if isinstance(t, dict) and isinstance(t.get("n_onoff"), int)]
+    skipped = rec.get("skipped") if isinstance(rec.get("skipped"), dict) else {}
+    if not any(n for _, n in per) and not skipped:
+        return None
+    text = (f"Proteins detected in one group of a comparison and in none of the other have no fold "
+            f"change, so they are not in the volcano or the DE results. They are listed apart in "
+            f"`{file}` as **detection patterns, not fold changes**: {rec.get('rule') or ''} ")
+    if per:
+        text += "Found: " + "; ".join(f"{contrast_label(c)} {n:,}" for c, n in per) + ". "
+    if skipped:
+        text += ("Not assessed (not a simple two-group comparison): "
+                 + ", ".join(contrast_label(c) for c in skipped) + ".")
+    return {"kind": "info", "title": "Proteins seen in only one group are listed separately",
+            "text": text.strip()}
+
+
+def incomplete_note(prov):
+    """The fixed "called on incomplete data" callout (every route), from run_de.R's
+    `incomplete_data` record and each contrast's n_called_incomplete in `de_tables`. None when the
+    record has none, or no significant call is flagged."""
+    rec = prov.get("incomplete_data") if isinstance(prov.get("incomplete_data"), dict) else None
+    tabs = prov.get("de_tables") if isinstance(prov.get("de_tables"), dict) else {}
+    if not rec:
+        return None
+    per = [(c, t.get("n_called_incomplete"), t.get("n_significant")) for c, t in tabs.items()
+           if isinstance(t, dict) and isinstance(t.get("n_called_incomplete"), int)]
+    if not any(n for _, n, _ in per):
+        return None
+    return {"kind": "warning", "title": "Some significant calls rest on missing values",
+            "text": ("Significant proteins that were not measured in every run of a compared group "
+                     "are flagged `called_on_incomplete_data` in the DE tables (`values_per_group` "
+                     "says how many runs of each group). "
+                     + "; ".join(f"{contrast_label(c)} {n:,} of {m:,}" for c, n, m in per) + ". "
+                     + f"{rec.get('benchmark_text') or ''}").strip()}
+
+
+def quantums_note(prov):
+    """The QuantUMS trade-off callout (MaxLFQ route): where the table is, which cutoffs this run
+    used and where they came from (DEFAULT when the user set none), the recommended row. A skipped
+    or failed table says so. None for a record without one."""
+    rec = prov.get("quantums_tradeoff") if isinstance(prov.get("quantums_tradeoff"), dict) else None
+    if not rec:
+        return None
+    file = rec.get("file") or "QuantUMS_tradeoff.csv"
+    if rec.get("status") == "failed":
+        return {"kind": "warning", "title": "The QuantUMS trade-off table could not be made",
+                "text": f"`{file}` was not written: {rec.get('reason') or 'no reason recorded'}."}
+    if rec.get("status") != "written":
+        return None        # skipped on purpose (limpa, no QuantUMS columns): the Methods say why
+    used = rec.get("used") if isinstance(rec.get("used"), dict) else {}
+    r = rec.get("recommended") if isinstance(rec.get("recommended"), dict) else {}
+    return {"kind": "info", "title": "What a QuantUMS cutoff would cost",
+            "text": (f"`{file}` shows, per comparison, the proteins tested, significant calls, calls "
+                     f"on incomplete data and proteins lost at five QuantUMS cutoffs. This analysis "
+                     f"used PG.MaxLFQ.Quality >= {used.get('pgQ')} and Empirical.Quality >= "
+                     f"{used.get('eQ')} ({rec.get('cutoff_source')}). {r.get('label')} is marked "
+                     f"*{r.get('tag')}*; the cutoff is your choice and was not changed.")}
 
 
 def database_note(prov, tables_dir, session=None):
@@ -1474,6 +1577,28 @@ def semi_specific_note(prov, session=None):
         return None
     text = cleavage_rules.semi_specific_caveat((rec or {}).get("cleavage"))
     return {"kind": "info", "title": "A semi-specific search", "text": text} if text else None
+
+
+def route_status_note(prov, session=None):
+    """The callout for a search route that is not a route of record (Radiant: experimental,
+    2.15.1), from the search record make_methods reads (route_status_record), worded by
+    make_methods.route_status_sentence (the one description). None for any other route or no
+    search record."""
+    path = search_record_path(prov, session)
+    if not path:
+        return None
+    import make_methods
+    try:
+        rec = make_methods.search_record(search_prov=path)
+    except (OSError, ValueError) as e:            # said, never a silent pass
+        print(f"[make_analysis_html] the search record {path} could not be read for its route "
+              f"status: {e}", file=sys.stderr)
+        return None
+    text = make_methods.route_status_sentence(rec).strip()
+    if not text:
+        return None
+    return {"kind": "warning", "title": f"Search route: {rec['route_status']['status']}",
+            "text": text}
 
 
 def added_sequences_note(session=None):

@@ -20,14 +20,14 @@ what you did afterwards; don't ask permission to unstick a job.
 - 143: Warnings that are not failures: Sage LFQ
 - 160: Warnings that are not failures: protein inference in step 5
 - 175: SLURM specifics (HIVE)
-- 193: Node faults: the node check every chain job runs first
-- 207: Keeping a search off nodes known to be bad (`--exclude`)
-- 232: Auto-recovery playbook (apply autonomously; log every action to `commands.log`)
-- 255: Don't
-- 273: Progress reporting (`--out`, `--poll`)
-- 308: 0c. Is this a resume? (step 0c)
-- 344: A closed laptop: `RECOVERY.md` (step 0c)
-- 353: 7b. The watch loop as SKILL.md runs it (step 7b)
+- 194: Node faults: the node check every chain job runs first
+- 209: Keeping a search off nodes known to be bad (`--exclude`)
+- 234: Auto-recovery playbook (apply autonomously; log every action to `commands.log`)
+- 262: Don't
+- 280: Progress reporting (`--out`, `--poll`)
+- 315: 0c. Is this a resume? (step 0c)
+- 351: A closed laptop: `RECOVERY.md` (step 0c)
+- 360: 7b. The watch loop as SKILL.md runs it (step 7b)
 <!-- /contents -->
 
 ## Watch the WHOLE chain, not its last job
@@ -105,9 +105,9 @@ any auto-fix you applied to the user.
 | `sage_no_mzml` | `FAILED: no mzML from …` / msconvert not found / needs mzML | the job's own conversion failed (it converts `.raw` with ThermoRawFileParser and `.d` with msconvert before Sage/Radiant). Read the converter's error above the FAILED line: for ThermoRawFileParser usually .NET (`bash scripts/ensure_dotnet8.sh`); for `.raw` through msconvert, a Linux build without vendor readers (bioconda's). Fix it, regenerate with `run_search.py --sbatch`, resubmit |
 | `disk` | Disk quota / No space left | free space or point `--out` elsewhere; resubmit |
 | `missing_input` | No such file / fasta/raw not found | a path is wrong — re-check Windows→WSL/HIVE path translation; resubmit |
-| `stalled` | job **RUNNING** but log frozen > `--stall-min` (default 15 min) | a hung file. `scancel` the task/job, **retry it once on a fresh node**; if it stalls again, **drop that file** and continue (see playbook), note it in Data Quality Notes |
+| `stalled` | job **RUNNING** but log frozen > `--stall-min` (default 15 min) | a hung file. `scancel` the task/job, **retry it once on a fresh node**; if it stalls again, **stop and ask the user** — never leave the file out yourself (see playbook) |
 | `held` | job PENDING with reason **`JobHeldUser`** / **`JobHeldAdmin`** | it will **never start by itself**, and it is **not** failed — do **not** resubmit (that duplicates it). `JobHeldUser`: `scontrol release <jobid>` once whatever it was held for is fixed; `JobHeldAdmin`: ask the HIVE admins. (A PENDING job otherwise reports "queued, not started" only when nothing has run yet; a chain step waiting on earlier steps keeps its file count.) |
-| `dependency_failed` | job PENDING with reason **`DependencyNeverSatisfied`** (an upstream step failed) | the chain is dead but **sits PENDING forever** (never leaves the queue). `sacct -j <arrayjob>` to find the failed step, fix it, resubmit downstream steps reusing completed outputs. If it was **step 1b**, `scancel` the pending steps 2–5 (ids in `<out>/jobs.txt`), then resubmit `step1b_window.sbatch` and steps 2–5 chained `afterok` on its new id (reusing `step1.predicted.speclib`), or re-run `submit.sh`: steps 2–5 refuse to start without the `window.txt` / `massacc.txt` step 1b writes (without them DIA-NN would optimise per file). Since 2.9 step 1b does **not** fail when only the probe's own machinery failed (its log unreadable — e.g. an NFS `Stale file handle` — a crash, or a time limit): it retries a crash or an unreadable log once and then **falls back** (`window.txt` = `auto`, `<out>/probe_fallback.json`), and the chain runs on — `watch_run.sh --all` then reports `probe_fallback: true` with a CAUTION: say so to the user, with its `reason`. It still fails, as before, on everything else — the job log names which: a **refused** mass accuracy (implausible: check the FASTA, species and calibration first), no .NET / DIA-NN cannot start, the probe's arguments, runs DIA-NN finished without logging a radius, a signal |
+| `dependency_failed` | job PENDING with reason **`DependencyNeverSatisfied`** (an upstream step failed) | the chain is dead but **sits PENDING forever** (never leaves the queue). `sacct -j <arrayjob>` to find the failed step, fix it, resubmit downstream steps reusing completed outputs. If it was **step 1b**, `scancel` the pending steps 2–5 (ids in `<out>/jobs.txt`), then resubmit `step1b_window.sbatch` and steps 2–5 chained `afterok` on its new id (reusing `step1.predicted.speclib`), or re-run `submit.sh`: steps 2–5 refuse to start without the `window.txt` / `massacc.txt` step 1b writes (without them DIA-NN would optimise per file). When only the probe's own machinery failed (its log unreadable — e.g. an NFS `Stale file handle` — a crash, or a time limit), step 1b retries a crash or an unreadable log once. **From 2.15.1 a probe that measures the window then fails** (the chain stops: resubmit, or pin a `--window` measured on an earlier search with the same LC method); 2.9–2.15.0 fell back to `window.txt` = `auto` instead. A probe that measures only the mass accuracy (`--window` pinned) still **falls back** to the documented level for every step (`<out>/probe_fallback.json`, mode `fallback_default`), and the chain runs on — `watch_run.sh --all` then reports `probe_fallback: true` with a CAUTION: say so to the user, with its `reason`. It still fails, as before, on everything else — the job log names which: a **refused** mass accuracy (implausible: check the FASTA, species and calibration first), no .NET / DIA-NN cannot start, the probe's arguments, runs DIA-NN finished without logging a radius, a signal |
 | `unknown_failure` | job FAILED with no known signature | read the full log; diagnose; fix; resubmit (and add the new signature here) |
 | `watcher_query_failed` | the watcher could not ask HIVE (unreachable, `HIVE_USER`/`HIVE_KEY` unset, or — with no local python3 — the skill not on HIVE: exit 3), or for `--slurm <id>` sacct and squeue both answered nothing (`state: query_failed`: SLURM tools not on PATH, or a wrong or aged-out id). A chain (`--all` / `--out` with `jobs.txt`) says the same for the ids neither answers for (`unknown_jobs`; `state: query_failed` when it is every id), and is never `done` while one is unknown. Always `failed: false` | **not a job failure: never resubmit on it.** Fix the connection (or `bash scripts/hive_exec.sh --put-skill`), or check the id with `hive_exec.sh 'sacct -j <id> -X'`, then poll again |
 | `watcher_no_python` | no usable `python3` on this computer and no `--hive` | **not a job failure** (`failed: false`). Install Python 3, or for a search on HIVE add `--hive` |
@@ -187,8 +187,9 @@ the protein-group matrix against 9,414). Tell staff it is benign, in one line, i
   resubmit the step on the high queue.
 - The job log is the sbatch `--output` file (the skill's `emit_sbatch` names it
   `<out>/<job>_<jobid>.log`).
-- When resubmitting after a fix, edit the sbatch (`--mem`/`--time`/`--gres`) and note
-  the change in `commands.log` so the reproducibility bundle records what happened.
+- A fix that changes memory, time or nodes is **re-generated** with `run_search.py` (the
+  `out_of_memory` / `timeout` rows above), never made by editing the sbatch by hand; the
+  command goes into `commands.log` as usual.
 
 ## Node faults: the node check every chain job runs first
 
@@ -201,8 +202,9 @@ node when the chain was generated, so one this node cannot see — a dropped `/q
 `NODE_FAULT: node=<n> check=<what> path=<p> detail=<why>` line, **before** DIA-NN runs, so the
 failure is never reported as "DIA-NN exited 0 but did not write …". The job-end post says
 "the compute node could not reach the storage". It is not the probe's ESTALE handling: step 1b's
-probe rereads its own log on `Stale file handle`, retries and falls back
-(`probe_fallback.py`) — that job succeeds, and only a failed job is classified.
+probe rereads its own log on `Stale file handle` and retries; a mass-accuracy-only probe then
+falls back (`probe_fallback.py`) and that job succeeds, while a window probe fails (2.15.1). Only a
+failed job is classified.
 
 ## Keeping a search off nodes known to be bad (`--exclude`)
 
@@ -235,11 +237,16 @@ and nothing is written) and recorded in `search_provenance.json` as `queue.exclu
   node — the `say` field. Not a retry of the same class against the 2-attempt limit below: the
   node retry is bounded by its own (2 per step).
 - **`stalled` (hung file):** `scancel <arrayjob>_<taskid>` (or the job). Retry that one file
-  once on a fresh node. If it stalls again, **drop it** — it's pathological (often a file
-  the facility itself re-ran). In the 5-step parallel chain, step 4 already auto-skips a
-  file with no step-2 `.quant`; remove it from step 3/step 5's `--f` list, and from
-  `file_list.txt` and the run count in `step5_report.sbatch` (step 5 fails on every listed
-  run without a `.quant`), and resume.
+  once on a fresh node. **If it stalls again, stop and ask the user** (SKILL.md golden rule 9:
+  runs left out are a person's decision). Tell them which file hung twice and what it costs to
+  leave it out (one sample fewer in its group). Never leave it out on your own, and never edit
+  `file_list.txt`, a step's `--f` list or the run count in `step5_report.sbatch`: the chain's run
+  list is fixed when it is generated, so step 5 fails on an edited one, and the record would
+  no longer match the search. What the user can choose:
+  - **Leave the file out.** Record their words (`log_decision.py`), then generate the search
+    again with `run_search.py` on the remaining files (a new chain; tell them it starts again
+    from step 1). At step 8 the run has no row in `conditions.csv`.
+  - **Check the file first** (copied completely? readable?), or ask Core staff, then retry.
 - **Broken `afterok` after you killed/dropped an array task:** the downstream steps go
   `DependencyNeverSatisfied`. Cancel them and **resubmit steps 3→4→5 fresh, reusing the
   completed `.quant`** (don't re-run step 1/library-prediction — reuse `step1.predicted.speclib`).
@@ -257,8 +264,8 @@ and nothing is written) and recorded in `search_provenance.json` as `queue.exclu
 - Don't declare a run "done" on a non-COMPLETED state, and don't proceed to DE until
   `report.parquet` exists.
 - Don't silently retry forever — after 2 failed auto-fix attempts of the same class,
-  stop and tell the user what's wrong. (Dropping 1 pathological file out of many and
-  continuing is *success*, not a failed retry.)
+  stop and tell the user what's wrong. A file that stalls twice is the user's decision, not a
+  third retry and not a file to leave out yourself (playbook above).
 - Don't wait for the user to notice a stall/failure — you are the monitor; recover, then
   report what you did.
 - **Don't use a passive "wait until the job leaves the queue" monitor for a chain.** If an
@@ -391,11 +398,16 @@ Pass `--log` so it can also catch **stalls** — a job stuck in `RUNNING` with i
 frozen (a hung file; `sacct` will show RUNNING forever). **If `failed` OR `stalled` is
 true, apply the `fix` and resubmit AUTONOMOUSLY — do not wait for the user.** Starting
 the search needed confirmation (golden rule #1); recovering a run that's already in
-flight does not. Common auto-fixes (→ the playbook above):
+flight does not. **Except** (each of these is told to the user, not resubmitted):
+`cancelled` (find out who cancelled it first: parallel sessions share one HIVE account),
+`held`, `needs_decision`, `watcher_query_failed`, a search that failed its run check
+(`check_report_runs.py`: never resubmitted, the user decides about the missing run), a file
+that stalled twice, a third `node_fault` retry, and a third fix of one class. A stalled job
+is RUNNING but hung: `scancel` it first, then retry; a RUNNING job that is progressing is
+never resubmitted. Common auto-fixes (→ the playbook above):
 
 - **stalled/hung file:** `scancel` that task, retry once on a fresh node; if it stalls
-  again, **drop that one file** and continue (step 4 of the parallel chain auto-skips a
-  file with no `.quant`); note the dropped file in **Data Quality Notes**.
+  again, **stop and ask the user** (the playbook above): never leave the file out yourself.
 - **failed step in the 5-step chain:** resubmit from the earliest incomplete step,
   **reusing completed `.quant` and `step1.predicted.speclib`** — never restart the whole
   cohort; broken `afterok` after a killed task → resubmit steps 3→4→5 fresh.
@@ -420,8 +432,8 @@ flight does not. Common auto-fixes (→ the playbook above):
   → `references/run-registry.md`
 
 **Every search — single-shot or parallel array — must run under this watch loop.** Stop
-and tell the user only after 2 failed auto-fixes of the same class (dropping 1 pathological
-file out of many is success, not a failure). Report what you recovered. Only proceed to DE
+and tell the user only after 2 failed auto-fixes of the same class. Report what you
+recovered. Only proceed to DE
 once `COMPLETED` and `report.parquet` exists.
 
 **5-step chain: check what the final pass kept before DE.** Step 5 compares its report with the

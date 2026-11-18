@@ -15,10 +15,10 @@ spectral library (`--seed-lib`); chemical labels (mTRAQ, dimethyl); a turnover /
 - 24: 1. What to ask (step 3)
 - 93: 2. The search (steps 6b and 7)
 - 163: 3. The ratio analysis (step 8)
-- 225: 4. Reading the results (say these in the report)
-- 287: 5. The rest of the pipeline
-- 306: 6. Statistical review (2026-10-15) and what is still open
-- 326: Step 8 for a SILAC session
+- 229: 4. Reading the results (say these in the report)
+- 291: 5. The rest of the pipeline
+- 310: 6. Statistical review (2026-10-15) and what is still open
+- 330: Step 8 for a SILAC session
 <!-- /contents -->
 
 ## 1. What to ask (step 3)
@@ -188,7 +188,11 @@ Rscript scripts/run_silac.R --input ./search_out/report.parquet --design input/s
    even split of increases and decreases is built in. The uncentred ratios are kept.
 5. Per replicate: the mean of its runs (re-injections of one mix; one run is that run).
 6. Protein groups with a ratio in at least `max(3, ceiling(n / 2))` of the n replicates holding
-   the comparison (`--min-replicates N` overrides; the default is tagged DEFAULT): a moderated
+   the comparison (`--min-replicates N` overrides; the default is tagged DEFAULT). With fewer
+   than 3 replicates in a comparison that default is above n, so `run_silac.R` refuses (2.15.1)
+   and names the comparisons: ask the user whether to test with `--min-replicates 2` (2 replicates
+   give little power; the Methods give the minimum as theirs) or to drop those comparisons. A
+   comparison with 1 replicate cannot be tested. For those tested: a moderated
    one-sample t-test against 0 (limma `lmFit` with an intercept-only design, `eBayes(robust =
    TRUE)`), Benjamini–Hochberg within each comparison. Significant: adj.P.Val < 0.05, no
    fold-change filter. The Methods give each comparison's minimum and n.

@@ -53,7 +53,7 @@ echo DONE
 | | question | reference |
 |---|---|---|
 | **camera** | are the set's proteins **more changed than the other proteins**? (competitive) | Wu & Smyth 2012, *NAR* 40:e133 |
-| **fry** | are the set's proteins **changed at all**? (self-contained; roast with infinite rotations) | Giner & Smyth 2016, *F1000Res* 5:2605 |
+| **fry** | are the set's proteins **changed at all**? (self-contained; roast with infinite rotations) | Giner & Smyth 2016, *F1000Res* 5:2605 (conference slides, not peer reviewed; doi:10.7490/f1000research.1113351.1); implemented in limma (Ritchie et al. 2015) |
 
 P-values are adjusted across the sets of each comparison (Benjamini–Hochberg), separately
 for each test. A set's `Call` joins the two BH lists; nothing is corrected across comparisons.

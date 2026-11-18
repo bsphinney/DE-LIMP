@@ -27,7 +27,9 @@ Built on R Shiny with the [limpa](https://bioconductor.org/packages/limpa/) pipe
 The UC Davis Proteomics Core pipeline runs as a skill for Claude Code: point it at a folder of raw
 mass-spec files, describe the experiment in your own words, and it does the search, the statistics,
 the report, the Methods and a reproducibility bundle
-([video](https://www.youtube.com/watch?v=roHknILC-Ec)). Its documentation is at
+([video](https://www.youtube.com/watch?v=roHknILC-Ec)). It searches DIA data with DIA-NN, and DDA
+data with Sage (ordinary tryptic Orbitrap) or FragPipe (timsTOF DDA-PASEF and non-specific-enzyme
+DDA), and works out the search settings from your data. Its documentation is at
 **[github.com/bsphinney/UCD-Proteomics-AI-Skill](https://github.com/bsphinney/UCD-Proteomics-AI-Skill)**.
 Install it in a terminal (one line):
 

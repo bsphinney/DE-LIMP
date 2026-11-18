@@ -119,6 +119,12 @@ CATALOG = [
      "most of their signal taken (SIPHONED), the contaminant entries that took them, and the "
      "re-search that would give them back. AUDIT.md and the report's Audit & caveats say it in "
      "words."),
+    (r"^sage_groups_not_quantified\.csv$", "Search output",
+     "Sage only: the protein groups that have no row in the DE because every one of their "
+     "peptides is shared with a larger group and was quantified there (razor peptides, "
+     "parsimony). One row per group: its proteins, how many peptides it had, and the groups its "
+     "peptides went to. Look here for a protein that is in the database but not in the tables. "
+     "Header only when there were none."),
     (r"^sage_adapt\.json$", "Search output",
      "Sage only: which lfq.parquet rows became report.parquet -- targets at q_value <= 0.05, "
      "decoys and failing rows dropped -- with the counts per file."),
@@ -203,6 +209,15 @@ CATALOG = [
      "Which values of Expression_Matrix.csv were measured and which inferred, per protein and "
      "sample (same rows and columns). What a 0 means is recorded in de_provenance.json "
      "`detection_matrix` (DPC: precursors observed, 0 = inferred by the model)."),
+    (r"^OnOff_Proteins\.csv$", "Differential expression",
+     "MaxLFQ route only: proteins detected in one group of a comparison and in none of the "
+     "other (on/off), which have no fold change or p-value, so they are not in the DE tables' "
+     "results. A detection pattern, not a fold change. de_provenance.json `onoff` has the rule."),
+    (r"^QuantUMS_tradeoff\.csv$", "Differential expression",
+     "MaxLFQ route only: the DE re-fitted at five QuantUMS cutoffs (none, pgQ 0.5, 0.75, 0.75 + eQ 0.75, "
+     "0.85): per comparison the proteins tested, significant calls, calls on incomplete data and proteins "
+     "lost. The row this analysis used is marked, with where its cutoffs came from. The cutoff stays "
+     "your choice. de_provenance.json `quantums_tradeoff` has the record."),
     (r"^QC_detected_vs_inferred\.csv$", "Differential expression",
      "Per sample: proteins detected (at least one precursor observed) vs inferred by the DPC "
      "model, as counts and percentages -- the real depth of each run."),

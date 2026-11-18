@@ -29,12 +29,14 @@ Usage:
       --diann '<diann cmd>' --out-dir ./lib
   python3 make_radiant_library.py --from-parquet lib.parquet --out-dir ./lib   # no DIA-NN
 """
-import sys, os, json, shlex, argparse, subprocess, csv
+import sys, os, json, shlex, argparse, subprocess, csv, hashlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from diann_parallel import diann_output_path  # noqa: E402  (how DIA-NN names its outputs)
 # what each alkylating agent leaves on cysteine, and DIA-NN's flags for it: the one map
 from estimate_params import CYS_ALKYLATION_CHOICES, cys_diann_flags  # noqa: E402
+# the digest, charge and fragment ranges the DIA-NN route searches: the one definition
+from estimate_params import diann_library_flags  # noqa: E402
 from safe_write import write_file  # noqa: E402
 
 # DIA-NN parquet column -> the name Radiant's FragLibTsvReader looks for.
@@ -71,6 +73,42 @@ LIBRARY_TSV = "radiant_library.tsv"
 # Without these Radiant cannot build a fragment library at all.
 REQUIRED = ["PrecursorMz", "ProductMz", "LibraryIntensity", "ModifiedPeptide",
             "PrecursorCharge", "FragmentType", "FragmentCharge", "FragmentSeriesNumber"]
+
+
+# What a library predicted here was built from, recorded beside it (<tsv>.meta.json) and compared
+# before one is reused. Up to 2.15.0 only the cysteine choice was, so a re-search into the same
+# --out after the FASTA changed searched the OLD database (audit 2026-11-17, lane 1 #1).
+META_SCHEMA = 2
+PRECURSOR_MZ_NOTE = ("DIA-NN's own default precursor m/z range: the Radiant route does not read "
+                     "the acquired isolation windows, so the library is not narrowed to them")
+
+
+def sha256_file(path, block=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(block), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def library_recipe(diann, fasta, cys):
+    """Everything a predicted library depends on, as recorded and compared: the FASTA's bytes,
+    the DIA-NN command (its path carries the pinned version), and the prediction flags."""
+    return {"schema": META_SCHEMA, "cys_alkylation": cys,
+            "fasta": os.path.abspath(fasta), "fasta_sha256": sha256_file(fasta),
+            "diann": diann,
+            "library_flags": diann_library_flags() + cys_diann_flags(cys),
+            "precursor_mz": PRECURSOR_MZ_NOTE}
+
+
+def reuse_mismatch(meta, recipe):
+    """None when the recorded library matches `recipe`; else what differs (said, then the library
+    is rebuilt). A record from before 2.15.1 has no FASTA hash and is always rebuilt."""
+    if not isinstance(meta, dict):
+        return "no record of what it was built from"
+    diff = [k for k in ("schema", "cys_alkylation", "fasta_sha256", "diann", "library_flags")
+            if meta.get(k) != recipe.get(k)]
+    return ("built with a different " + ", ".join(diff)) if diff else None
 
 
 def sh(cmd):
@@ -127,19 +165,32 @@ def main():
 
     os.makedirs(a.out_dir, exist_ok=True)
     tsv = os.path.join(a.out_dir, LIBRARY_TSV)
-    # What the library was predicted with, beside it: a library is reused only for the same
-    # cysteine choice. One from before 2.12 has no record -- and fixed nothing on C, whatever the
-    # prep -- so it is rebuilt.
+    # What the library was predicted from, beside it: a library is reused only when the FASTA
+    # (sha256), the DIA-NN command, the prediction flags and the cysteine choice all match
+    # (library_recipe). Anything else -- an older record included -- is rebuilt, and said.
     meta = tsv + ".meta.json"
-    try:
-        with open(meta) as fh:
-            built = json.load(fh).get("cys_alkylation")
-    except (OSError, ValueError, AttributeError):
-        built = None
-    if (os.path.exists(tsv) and os.path.getsize(tsv) > 1_000_000 and built == a.cys_alkylation
-            and not (a.from_speclib or a.from_parquet)):
-        print(json.dumps({"library": tsv, "reused": True, "cys_alkylation": built}, indent=2))
-        return
+    predict = not (a.from_speclib or a.from_parquet)
+    recipe = None
+    if predict:
+        if not a.fasta:
+            sys.exit("--fasta is required to predict a library.")
+        if not a.diann:
+            sys.exit("--diann is required unless --from-parquet is given.")
+        if not os.path.isfile(a.fasta):
+            sys.exit(f"--fasta {a.fasta} is not a readable file.")
+        recipe = library_recipe(a.diann, a.fasta, a.cys_alkylation)
+    if predict and os.path.exists(tsv) and os.path.getsize(tsv) > 1_000_000:
+        try:
+            with open(meta) as fh:
+                built = json.load(fh)
+        except (OSError, ValueError):
+            built = None
+        why = reuse_mismatch(built, recipe)
+        if why is None:
+            print(json.dumps({"library": tsv, "reused": True, **recipe}, indent=2))
+            return
+        sys.stderr.write(f"[make_radiant_library] the library already in {a.out_dir} is not "
+                         f"reused ({why}); predicting a new one\n")
 
     parquet = a.from_parquet
     if not parquet:
@@ -155,10 +206,12 @@ def main():
             out_lib = diann_output_path(os.path.join(a.out_dir, "diann_predicted_lib.speclib"),
                                         "--out-lib")
             print("[1/3] DIA-NN: predicting the library from the FASTA")
-            cys = " ".join(shlex.quote(x) for x in cys_diann_flags(a.cys_alkylation))
+            # the same digest, charges and fragment range as the DIA-NN route's cfg, and the
+            # cysteine choice (recipe["library_flags"]); DIA-NN's defaults otherwise
+            flags = " ".join(shlex.quote(x) for x in recipe["library_flags"])
             sh(f"{a.diann} --fasta {shlex.quote(a.fasta)} --fasta-search --predictor "
                f"--gen-spec-lib --out-lib {shlex.quote(out_lib)} --threads {a.threads}"
-               + (f" {cys}" if cys else ""))
+               + (f" {flags}" if flags else ""))
             speclib = find_written(a.out_dir, "diann_predicted_lib")
             if not speclib:
                 sys.exit(f"DIA-NN wrote no library into {a.out_dir}: "
@@ -176,16 +229,20 @@ def main():
 
     print("[3/3] parquet -> Radiant TSV (renaming to the schema its reader keys on)")
     n, names = parquet_to_tsv(parquet, tsv)
-    # predicted here: the choice it was predicted with; converted from a given library: unknown
-    write_file(meta, json.dumps({"cys_alkylation": (None if (a.from_speclib or a.from_parquet)
-                                                    else a.cys_alkylation)}) + "\n")
+    # predicted here: what it was predicted from; converted from a given library: unknown, so
+    # never reused (no fasta_sha256)
+    write_file(meta, json.dumps(recipe if predict else {"schema": META_SCHEMA,
+                                                         "cys_alkylation": None},
+                                indent=2) + "\n")
     print(json.dumps({
         "library": tsv,
         "rows": n,
         "size_bytes": os.path.getsize(tsv),
         "columns": names,
         "source_parquet": parquet,
-        "cys_alkylation": None if (a.from_speclib or a.from_parquet) else a.cys_alkylation,
+        "cys_alkylation": a.cys_alkylation if predict else None,
+        **({k: recipe[k] for k in ("fasta_sha256", "library_flags", "precursor_mz")}
+           if predict else {}),
         "note": "Radiant reads .fragLibFF/.tsv/.csv/.speclib, but rejects DIA-NN 2.x "
                 ".speclib (format v-10/-11; it supports v>=-3) — hence the TSV.",
     }, indent=2))

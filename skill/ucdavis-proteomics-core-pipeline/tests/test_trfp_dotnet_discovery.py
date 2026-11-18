@@ -438,7 +438,9 @@ cp "$FAKE_DOTNET" "$dir/dotnet"; chmod +x "$dir/dotnet"
 class EnsureDotnet8(unittest.TestCase):
     """ensure_dotnet8.sh with a stub curl and a stub installer: no network, ever."""
 
-    TOOLS = ("awk", "bash", "chmod", "cp", "dirname", "mkdir", "mktemp", "readlink", "rm")
+    # cut + shasum: verify_download.sh checks the installer script's sha256 before bash runs it
+    TOOLS = ("awk", "bash", "chmod", "cp", "cut", "dirname", "mkdir", "mktemp", "readlink", "rm",
+             "shasum")
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -460,6 +462,14 @@ class EnsureDotnet8(unittest.TestCase):
             "FAKE_LOG": self.log,
             "FAKE_INSTALLER": _exe(os.path.join(self.d, "installer.sh"), FAKE_INSTALLER),
             "FAKE_DOTNET": _exe(os.path.join(self.d, "fake_dotnet"), FAKE_DOTNET)})
+        # the stand-in installer is "the pinned script": its sha256 is the pin for this test
+        import hashlib
+        with open(self.env["FAKE_INSTALLER"], "rb") as fh:
+            sha = hashlib.sha256(fh.read()).hexdigest()
+        pins = os.path.join(self.d, "pins.tsv")
+        with open(pins, "w") as fh:
+            fh.write(f"dotnet-install-5147e32 {sha} test\n")
+        self.env["PINNED_CHECKSUMS"] = pins
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -471,6 +481,15 @@ class EnsureDotnet8(unittest.TestCase):
 
     def frameworks(self, root):
         return sorted(os.listdir(os.path.join(root, "shared")))
+
+    def test_an_installer_script_that_does_not_match_its_pin_is_never_run(self):
+        """2.15.1: dotnet-install.sh is checked against its pinned sha256 before bash runs it."""
+        with open(self.env["PINNED_CHECKSUMS"], "w") as fh:
+            fh.write("dotnet-install-5147e32 " + "0" * 64 + " test\n")
+        p, log = self.run_it()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertNotIn("install dotnet", log)
+        self.assertIn("NOT run", p.stderr)
 
     def test_a_root_with_both_is_reused_without_a_download(self):
         fake_dotnet_root(self.dest)
@@ -561,7 +580,7 @@ class SetupReportsThermoRawReadiness(setup_t.SetupCheckHarness):
         self.assertIn("ensure_dotnet8.sh", r["note"])
         self.assertTrue(any("thermo_raw_reader.note" in n for n in s["notes"]), s["notes"])
         # the keys the orchestrator already gates on are still there
-        self.assertEqual(set(s["ready_for"]), {"de", "dia", "dda", "thermo_raw"})
+        self.assertEqual(set(s["ready_for"]), {"de", "dia", "dia_raw", "dda", "thermo_raw"})
 
     def test_the_core_copy_with_ensure_dotnet8s_install_is_ready(self):
         root = fake_dotnet_root(os.path.join(self.d, ".proteomics-pipeline", "dotnet8"))

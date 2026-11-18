@@ -2,7 +2,8 @@
 """
 resolve_defaults.py -- pick the search defaults for a run FROM THE DATA TYPE.
 
-Replaces the old fetch_workflows.py registry (removed in 2.15). Same output contract
+Replaces the old fetch_workflows.py registry (no longer used since 2026-08-14; the script
+itself was deleted in 2.15). Same output contract
 (workflow.manifest.json + a JSON summary on stdout), so run_search.py and
 provenance.py consume it unchanged -- but nothing is fetched over the network
 and there is no menu.
@@ -79,6 +80,46 @@ ENGINE_VERSIONS = {
     "fragpipe": "24.0",
     "radiant": "2.3.3",   # container release, NOT the Radiant DIA version inside
 }
+# Engines whose pin above is a CONTAINER tag, not the engine's own version number. The Methods and
+# the report print it as "<this label> <tag>", never as "Radiant 2.3.3" (2.15.1, audit lane 3 #6),
+# unless the search's record also names the engine's own version (`engine_version`).
+CONTAINER_TAG_ENGINES = {"radiant": "radiant-fulcrum container"}
+
+
+def unknown_instrument_note(cls, engine, label):
+    """The question for an instrument classify_instrument() did not recognise (class "unknown"),
+    or None. It used to resolve with needs_confirmation false and no note, though SKILL.md step 2
+    says to ask (2.15.1 follow-up). Plain words: what happens if they carry on."""
+    if cls != "unknown":
+        return None
+    then = ("DIA-NN will calibrate the mass accuracy itself on every run: slower and less certain "
+            "(DIA-NN calls it 'for preliminary analyses only'), and a cohort then runs as one "
+            "search on one node instead of in parallel" if engine == "diann" else
+            "the mass tolerances cannot be set from the instrument")
+    return (f"The instrument was not recognised ({label}). Ask the user which instrument it is "
+            f"and re-run with --instrument. If it stays unknown, {then}: say so in the "
+            f"confirmation and carry on only if they agree.")
+
+
+def engine_version_text(engine, version, engine_version=None, label=None, pinned=False):
+    """THE printed version of a search engine (the Methods, the report header, the Slack post, the
+    README: make_methods.search_record and session.search_engine). For an engine whose recorded
+    version is a container tag (CONTAINER_TAG_ENGINES): the engine's own version when the record
+    names one (`engine_version`), else the tag said to be one -- "(radiant-fulcrum container 2.3.3;
+    the Radiant version inside it was not recorded)", or, for a manifest pin (`pinned`),
+    "radiant-fulcrum container 2.3.3". Any other engine: `version` as recorded. None when there is
+    nothing to print."""
+    kind = CONTAINER_TAG_ENGINES.get(str(engine or "").lower())
+    if not kind:
+        return str(version) if version else None
+    if engine_version and not pinned:
+        return str(engine_version)
+    if not version:
+        return None
+    if pinned:
+        return f"{kind} {version}"
+    return (f"({kind} {version}; the {label or engine} version inside it was not "
+            f"recorded)")
 
 # Pinned Skyline, for the peak check after DE (skyline_peaks.py; references/skyline.md). Not a
 # search engine: SkylineCmd runs headless under Wine in ProteoWizard's vendor-reader container.
@@ -379,6 +420,10 @@ def main():
     # the manifest and nothing asked the user. Still exit 0 -- callers rely on it -- but say so
     # on stderr and at the top of the manifest and stdout, where step 4's confirmation reads.
     ask = resolution_question(cls, engine, r1, r2)
+    unknown = unknown_instrument_note(cls, engine, label)
+    if unknown:
+        notes.append(unknown)
+        ask = f"{ask} {unknown}" if ask else unknown
     if ask:
         sys.stderr.write(f"[resolve_defaults] NEEDS CONFIRMATION: {ask}\n")
 

@@ -480,10 +480,12 @@ class Refused(Exception):
 
 
 def de_method(engine, acq):
-    """The DE input for an engine's output: "dpc" (limpa from precursors: DIA-NN, Radiant, and
-    FragPipe's DIA route, whose quantities are DIA-NN's) or "maxlfq" (a protein table: Sage and
-    FragPipe DDA, through run_search.py's adapter)."""
-    if engine == "sage":
+    """The DE input for an engine's output: "dpc" (limpa from precursors: DIA-NN, and FragPipe's
+    DIA route, whose quantities are DIA-NN's) or "maxlfq" (a table run_search.py's adapter wrote:
+    Sage, FragPipe DDA and Radiant). 2.15.1 follow-up: Radiant was "dpc", but adapt_radiant writes
+    one protein x run row (PG.MaxLFQ, no precursor columns), which limpa cannot read and the
+    protein screen refuses for dpc."""
+    if engine in ("sage", "radiant"):
         return "maxlfq"
     if engine == "fragpipe":
         return "maxlfq" if str(acq).upper() == "DDA" else "dpc"

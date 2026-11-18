@@ -73,11 +73,17 @@ def detect_queue(partition, account, qos, peak_cpus=None, preemptible_ok=False):
         return partition, account, qos
 
 
-def header(job, cpus, mem, hours, partition, account, qos, array=None, exclude=None):
+def header(job, cpus, mem, hours, partition, account, qos, array=None, exclude=None,
+           log_dir=None):
+    """A step's #SBATCH lines. `log_dir`: the folder the step scripts are in, so the log lands
+    there however the step is submitted -- a relative --output is resolved against sbatch's
+    working directory, and a step resubmitted by path from $HOME wrote its log to $HOME, where
+    the watcher never looks (2.15.1; the same rule as diann_parallel.header)."""
+    log = (os.path.join(os.path.abspath(log_dir), "%x_%j.log") if log_dir else "%x_%j.log")
     L = ["#!/bin/bash -l", f"#SBATCH --job-name={job}",
          f"#SBATCH --cpus-per-task={cpus}", f"#SBATCH --mem={mem}G",
          f"#SBATCH --time={hours}:00:00",
-         f"#SBATCH --output=%x_%j.log"]
+         f'#SBATCH --output="{log}"']
     if partition:
         L.append(f"#SBATCH --partition={partition}")
     if account:
@@ -257,8 +263,8 @@ def main():
                                          preemptible_ok=True)      # array
     part, acct, qos = detect_queue(a.partition, a.account, a.qos,
                                    peak_cpus=a.fulcrum_cpus)       # single jobs
-    q = dict(partition=part, account=acct, qos=qos, exclude=exclude)
-    q_array = dict(partition=part_a, account=acct_a, qos=qos_a, exclude=exclude)
+    q = dict(partition=part, account=acct, qos=qos, exclude=exclude, log_dir=D)
+    q_array = dict(partition=part_a, account=acct_a, qos=qos_a, exclude=exclude, log_dir=D)
 
     # The job-end hook (notify_slack.wrap_job_script, the one definition: run log -> FRAN ->
     # Slack): step 3 ends the search and reports success or failure (and stages a finished

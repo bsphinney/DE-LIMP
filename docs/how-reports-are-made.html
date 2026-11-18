@@ -167,12 +167,12 @@ footer { border-top: 1px solid var(--rule); padding-top: 20px; display: grid; ga
     <div>
       <span class="tag tool">Software</span>
       <h3>The numbers come from standard tools</h3>
-      <p>DIA-NN (DIA data) or Sage (DDA data) searched the raw files. R packages, usually limpa and limma, did the quantification and statistics; each report names the ones it used. Every number in the report comes from these, and the statistics can be re-run as plain R with no AI involved.</p>
+      <p>A search engine searched the raw files: DIA-NN for DIA data; Sage or FragPipe for DDA data (the report names the engine and its version). R packages, usually limpa and limma, did the quantification and statistics; each report names the ones it used. Every number in the report comes from these, and the statistics can be re-run as plain R with no AI involved.</p>
     </div>
     <div>
       <span class="tag claude">Claude</span>
       <h3>Claude ran the tools and wrote the words</h3>
-      <p>Claude, working in Claude Code, ran each step, read the tables and figures, and wrote the report text and, when there is one, the podcast script. Separate Claude reviewers check the podcast script, and the analysis too when it calls for an expert review.</p>
+      <p>Claude, working in Claude Code, ran each step, read the tables and figures, and wrote the report text and, when there is one, the podcast script. Separate AI review passes check the podcast script, and the analysis too when it calls for an expert review; a report says which reviews ran.</p>
     </div>
     <div>
       <span class="tag gemini">Gemini</span>
@@ -199,7 +199,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 20px; display: grid; ga
       <div class="who"><span class="tag tool">Software</span></div>
     </li>
     <li>
-      <div class="body"><h3>Search the spectra</h3><p><a href="https://github.com/vdemichev/DiaNN">DIA-NN</a> 2.7.0 (DIA data, library-free, 1% FDR, match-between-runs) or <a href="https://github.com/lazear/sage">Sage</a> (DDA data). At the Core this runs as jobs on UC Davis's HIVE computing cluster.</p></div>
+      <div class="body"><h3>Search the spectra</h3><p>DIA data are searched with <a href="https://github.com/vdemichev/DiaNN">DIA-NN</a>. DDA data are searched with <a href="https://github.com/lazear/sage">Sage</a> (ordinary tryptic Orbitrap data) or <a href="https://fragpipe.nesvilab.org/">FragPipe</a> (timsTOF DDA-PASEF and non-specific-enzyme data). Other engines (Radiant, FragPipe's DIA route) are used on request. The skill works out the settings from the data, and each report's own "How this report was made" section and Methods name the engine, its version and the settings that were used, including whether match-between-runs was on. At the Core this runs as jobs on UC Davis's HIVE computing cluster.</p></div>
       <div class="who"><span class="tag tool">Software</span></div>
     </li>
     <li>
@@ -215,7 +215,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 20px; display: grid; ga
       <div class="who"><span class="tag claude">Claude</span></div>
     </li>
     <li class="phase-claude">
-      <div class="body"><h3>Expert review</h3><p>When a statistical claim goes to a collaborator, a result looks extreme (log2FC above 5, p below 10<sup>−10</sup>) or the organism is new, three separate Claude agents review the analysis independently, as a proteomics expert, a biologist and a statistician. Their points become the "Expert Review Notes" section.</p></div>
+      <div class="body"><h3>Expert review</h3><p>When a statistical claim goes to a collaborator, a result looks extreme (log2FC above 5, p below 10<sup>−10</sup>) or the organism is new, three separate AI review passes look at the analysis, one each from a proteomics, a biology and a statistics point of view. Each pass is the same kind of AI model given a different brief, so it is a second look, not a human expert. Their points become the "Expert Review Notes" section. A report says which reviews were run.</p></div>
       <div class="who"><span class="tag claude">Claude</span></div>
     </li>
     <li class="phase-claude">
@@ -223,7 +223,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 20px; display: grid; ga
       <div class="who"><span class="tag claude">Claude</span></div>
     </li>
     <li>
-      <div class="body"><h3>Check the script</h3><p>A script compares every number, gene-like symbol and capitalised name in the script with the report, and fails anything it cannot find. A separate Claude agent, not the one that wrote the script, then reads each sentence for overstatement and claims the robustness checks do not support.</p></div>
+      <div class="body"><h3>Check the script</h3><p>A script compares every number, gene-like symbol and capitalised name in the script with the report, and fails anything it cannot find. A separate AI pass, not the one that wrote the script, then reads each sentence for overstatement and claims the robustness checks do not support.</p></div>
       <div class="who"><span class="tag tool">Software</span><span class="tag claude">Claude</span></div>
     </li>
     <li>
@@ -250,14 +250,14 @@ footer { border-top: 1px solid var(--rule); padding-top: 20px; display: grid; ga
     <table>
       <thead><tr><th scope="col">Model</th><th scope="col">Made by</th><th scope="col">Its job here</th><th scope="col">Where it runs</th><th scope="col">What it is given</th></tr></thead>
       <tbody>
-        <tr><th scope="row">Claude Opus 5.5<br><span class="tag claude">Claude</span></th><td>Anthropic</td><td>Runs the steps, writes the report text and the podcast script; separate Claude agents review</td><td>Claude Code on the computer running the analysis (at the Core, a Core computer); the model itself runs in Anthropic's cloud</td><td>Whatever it reads: results tables, figures, logs, the report</td></tr>
-        <tr><th scope="row">DIA-NN 2.7.0 neural networks<br><span class="tag tool">Software</span></th><td>Demichev and colleagues (<em>Nature Methods</em>)</td><td>Predicts each peptide's fragments, retention time and ion mobility, and scores matches against decoys</td><td>The computer or cluster that runs the search (at the Core, HIVE)</td><td>The raw instrument files</td></tr>
+        <tr><th scope="row">Claude, through Claude Code<br><span class="tag claude">Claude</span></th><td>Anthropic</td><td>Runs the steps, writes the report text and the podcast script; separate AI passes review</td><td>Claude Code on the computer running the analysis (at the Core, a Core computer); the model itself runs in Anthropic's cloud</td><td>Whatever it reads: results tables, figures, logs, the report</td></tr>
+        <tr><th scope="row">The search engine's neural networks (DIA-NN)<br><span class="tag tool">Software</span></th><td>Demichev and colleagues (<em>Nature Methods</em>, 2020)</td><td>Predicts each peptide's fragments, retention time and ion mobility, and scores matches against decoys</td><td>The computer or cluster that runs the search (at the Core, HIVE)</td><td>The raw instrument files</td></tr>
         <tr><th scope="row">A Gemini speech model, such as gemini-2.5-flash-preview-tts<br><span class="tag gemini">Gemini</span></th><td>Google</td><td>The two podcast voices, Kore and Charon</td><td>Google's cloud</td><td>The podcast transcript text only</td></tr>
         <tr><th scope="row">gemini-2.5-flash<br><span class="tag gemini">Gemini</span></th><td>Google</td><td>Transcribes the audio back for the listen-back check</td><td>Google's cloud</td><td>The finished audio</td></tr>
         <tr><th scope="row">Kokoro-82M<br><span class="tag local">Local</span> <span class="tag soon">New in 2.14</span></th><td>hexgrad (open source, Apache-2.0)</td><td>The local podcast voices, used instead of Gemini</td><td>The Core's container on HIVE</td><td>The podcast transcript text; nothing leaves campus</td></tr>
         <tr><th scope="row">Whisper large-v3-turbo and small.en<br><span class="tag local">Local</span> <span class="tag soon">New in 2.14</span></th><td>OpenAI (open source, MIT)</td><td>Hear the local audio back for the check</td><td>The Core's container on HIVE</td><td>The finished audio; nothing leaves campus</td></tr>
       </tbody>
-      <caption>Each report's own "How this report was made" section, and its podcast transcript, say which software and which voice model made it. Claude Opus 5.5 is the Claude model the Core uses as of this release (skill 2.15.0). The skill can also use newer Gemini speech models, and it falls back to another one if a model stops answering. The Kokoro and Whisper rows are the local option, added in skill 2.14.0.</caption>
+      <caption>Each report's own "How this report was made" section, and its podcast transcript, say which software and which voice model made it. The exact Claude model is not fixed by the skill: it is whichever model your Claude Code session runs, and a report records it only when the session names it. The skill can also use newer Gemini speech models, and it falls back to another one if a model stops answering. The Kokoro and Whisper rows are the local option, added in skill 2.14.0.</caption>
     </table>
   </div>
 </section>
@@ -289,7 +289,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 20px; display: grid; ga
   <div class="checks">
     <div class="check"><h3>The AI does not make the numbers</h3><p>Claude runs the tools and reports their output. It does not compute statistics itself. The plain R script in the bundle re-creates every statistical result without Claude.</p></div>
     <div class="check"><h3>Every hit is re-tested</h3><p>Each significant protein is tested again on complete data only, and again with each group allowed its own variability. The report leads with the hits that survive both.</p></div>
-    <div class="check"><h3>Independent reviewers</h3><p>The expert reviewers and the podcast's meaning check are separate Claude agents, not the one that wrote the text, so they do not share its assumptions.</p></div>
+    <div class="check"><h3>Independent reviewers</h3><p>The expert reviews and the podcast's meaning check are separate AI passes, not the one that wrote the text. They are the same kind of model, so they can share its blind spots; they are a second look, not an independent expert.</p></div>
     <div class="check"><h3>Claude writes the script, a tool checks it</h3><p>An early version let a model write the podcast straight from the report. It passed a number check yet still invented facts, such as calling limpa "our Core's custom extension to limma". Now Claude writes the script from the report it has read, and a script checks every number and name against the report.</p></div>
   </div>
   <div class="note">
@@ -312,7 +312,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 20px; display: grid; ga
       <h3>Install the skill</h3>
       <p>In a terminal, one line, then start Claude Code:</p>
       <div class="cmd"><pre id="cmd-install">claude plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git &amp;&amp; claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core</pre><button type="button" class="copy" data-copy="cmd-install">Copy</button></div>
-      <p class="small muted">Source and documentation: <a href="https://github.com/bsphinney/UCD-Proteomics-AI-Skill/tree/main/skill/ucdavis-proteomics-core-pipeline">github.com/bsphinney/UCD-Proteomics-AI-Skill</a>, folder <code>skill/ucdavis-proteomics-core-pipeline</code>. Current release 2.15.0.</p>
+      <p class="small muted">Source and documentation: <a href="https://github.com/bsphinney/UCD-Proteomics-AI-Skill/tree/main/skill/ucdavis-proteomics-core-pipeline">github.com/bsphinney/UCD-Proteomics-AI-Skill</a>, folder <code>skill/ucdavis-proteomics-core-pipeline</code>. Current release 2.15.1.</p>
     </div></li>
     <li><div class="body">
       <h3>Ask in plain words</h3>
@@ -334,7 +334,7 @@ footer { border-top: 1px solid var(--rule); padding-top: 20px; display: grid; ga
 
   <div class="tw">
     <table>
-      <thead><tr><th scope="col">Where you run it</th><th scope="col">DIA data (DIA-NN)</th><th scope="col">DDA data (Sage) and statistics</th></tr></thead>
+      <thead><tr><th scope="col">Where you run it</th><th scope="col">DIA data (DIA-NN)</th><th scope="col">DDA data (Sage; FragPipe where it can run) and statistics</th></tr></thead>
       <tbody>
         <tr><th scope="row">Linux workstation</th><td>Downloads the free DIA-NN Academia build automatically</td><td>Installed automatically</td></tr>
         <tr><th scope="row">Mac</th><td>DIA-NN has no Mac build, so install Docker Desktop once; the skill then builds an image from DIA-NN's own official release</td><td>Installed automatically, no Docker needed; DDA files already in mzML need nothing else</td></tr>

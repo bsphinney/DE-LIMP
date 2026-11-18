@@ -172,7 +172,8 @@ class SetupLimpaGate(setup_t.SetupCheckHarness):
         for c in creates + installs:
             self.assertIn("--override-channels -c conda-forge -c bioconda", c)
         for pkg in ("bioconductor-limma", "r-statmod", "r-data.table", "r-nanoparquet"):
-            self.assertIn(f" {pkg} ", f" {creates[0]} ")
+            # (2.15.1: limma and statmod carry a pinned version, `pkg=<version>`)
+            self.assertRegex(f" {creates[0]} ", rf" {pkg}(=\S+)? ")
 
     # ---- nanoparquet -------------------------------------------------------------------------
     def np_missing(self):

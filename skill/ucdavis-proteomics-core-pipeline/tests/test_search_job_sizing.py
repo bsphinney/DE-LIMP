@@ -98,7 +98,8 @@ def search(d, engine, *extra, cfg=None, n_files=2, slurm=False, n_seq=None, sage
         _write(os.path.join(b, "sbatch"), "#!/bin/sh\necho 1\n", 0o755)
         path.insert(0, b)
     env.update(PATH=os.pathsep.join(path), HPCCF_SLURM_BIN=os.path.join(d, "no_slurm"),
-               UCD_HPC_CLUSTER_CONF=os.path.join(d, "no_cluster_file"))
+               UCD_HPC_CLUSTER_CONF=os.path.join(d, "no_cluster_file"),
+               HIVE_GROUP_DIR=d)   # a fake sbatch stands for HIVE (2.15.1: cluster_is_hive)
     env.pop("FRAGPIPE_TOOLS_FOLDER", None)
     env["PYTHONPATH"] = roomy_disk_dir(d)      # the stage's room is not the runner's disk (job_env.py)
     env.update(env_extra or {})

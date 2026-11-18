@@ -240,7 +240,7 @@ if [ "$MODE" = "chain" ]; then
   # not at this path; the provenance is written with indent=2, so these are exact.
   fb=""
   if [ "$(run "p=$QD/search_provenance.json; if [ -f \"\$p\" ]; then grep -qE '\"mode\": \"fallback_|\"probe_fallback\": [{]' \"\$p\" && echo yes; else test -s $QD/probe_fallback.json && echo yes; fi" 2>/dev/null)" = yes ]; then
-    fb=",\"probe_fallback\":true,\"caution\":\"CAUTION: step 1b FELL BACK -- the scan window (and any planned mass accuracy) was NOT measured; DIA-NN chooses it per run. Tell the user, with the reason in $CHAINDIR/probe_fallback.json, and re-run the search if the cause was transient.\""
+    fb=",\"probe_fallback\":true,\"caution\":\"CAUTION: step 1b FELL BACK -- what it was to measure was NOT measured: the mass accuracy is the documented DEFAULT level for every run (a search from 2.15.0 or earlier: the scan window too, chosen by DIA-NN per run). Tell the user, with the reason in $CHAINDIR/probe_fallback.json, and re-run the search if the cause was transient.\""
   fi
   [ -z "$worst" ] && worst="${cancelled:-}"
   if $anyfail; then

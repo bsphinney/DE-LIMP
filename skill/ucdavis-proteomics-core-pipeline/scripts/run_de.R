@@ -7,22 +7,28 @@
 #
 #   dpc     DPC-Quant + limma (limpa). Default DE-LIMP path.
 #           readDIANN -> dpcCN -> dpcQuant -> dpcDE -> contrasts.fit -> eBayes.
-#           Missing precursors are handled by the detection-probability model;
-#           nothing is imputed or dropped. dpcDE wraps voomaLmFitWithImputation,
-#           so the imputation uncertainty is propagated into the limma fit.
+#           Missing precursors are modelled by the detection-probability curve, not
+#           dropped: a protein's value in a run where none of its precursors was
+#           detected is a model-based estimate, not a measurement. dpcDE wraps
+#           voomaLmFitWithImputation, so that uncertainty is propagated into the fit.
 #           Cite: Li M, Cobbold SA, Smyth GK (2025) bioRxiv 10.1101/2025.04.28.651125;
 #                 Li M, Smyth GK (2023) Bioinformatics 39(5):btad200.
 #
 #   maxlfq  MaxLFQ + limma. DE-LIMP alternative path.
 #           DIA-NN PG.MaxLFQ -> log2 -> [between-run step] -> lmFit -> contrasts.fit -> eBayes.
 #           The between-run step is --between-run's (build_maxlfq.R maxlfq_between_run, the one
-#           rule). Default auto: none on DIA-NN's already-normalised PG.MaxLFQ (since 2.14.2);
-#           quantile normalisation (limma::normalizeBetweenArrays) on a --no-norm search's
-#           PG.MaxLFQ and on an adapted engine's declared quantities (Sage, FragPipe ...).
-#           (--quantities raw: a --no-norm report's PG.MaxLFQ, and no between-run step.)
+#           rule). Default auto: none on quantities their engine already normalised (DIA-NN's
+#           PG.MaxLFQ since 2.14.2; IonQuant/directLFQ); the location-only median_ratio step on
+#           quantities no engine normalised (a --no-norm search's PG.MaxLFQ and Sage's LFQ, 2.15.1;
+#           quantile up to 2.15.0) or, for an adapted report, when it is not recorded. A Sage report's
+#           peptides are rolled up per protein by Tukey's median polish.
+#           (--quantities raw: a --no-norm report's PG.MaxLFQ, or an adapted report whose engine
+#           did not normalise (Sage), and no between-run step.)
 #           NAs are left in place; limma drops them per row at fit time.
 #           Proteins entirely missing in one condition are reported separately
-#           as qualitative on/off calls.
+#           as qualitative on/off calls: OnOff_Proteins.csv (onoff.R, DE-LIMP's
+#           compute_onoff_proteins), counted BEFORE the coverage filter, for simple A-B
+#           contrasts; --onoff-min-n (default 2) = runs needed in the group that has it.
 #
 # Input contract: a DIA-NN report (report.parquet preferred, or report.tsv).
 # For Sage / FragPipe / AlphaDIA / Radiant results, use the DIA-NN-shaped report.parquet
@@ -55,12 +61,17 @@
 #               with the --between-run step (below).
 #   raw         dpc: Precursor.Quantity (DIA-NN's non-normalised quantity); maxlfq: PG.MaxLFQ of a
 #               report searched with --no-norm (refused otherwise), with NO between-run step.
-# --between-run auto|none|quantile|median (default auto; --method maxlfq only, refused with dpc):
-#   the step on the log2 MaxLFQ matrix. auto: none for a DIA-NN report DIA-NN normalised (a
-#   quantile step on top gave 61% wrong calls on the PXD063416 4 m/z benchmark), quantile for a
-#   --no-norm search's PG.MaxLFQ and for an engine's declared quantities, none tagged [confirm]
-#   when whether DIA-NN normalised is not recorded. quantile / median / none: as given, recorded
-#   as chosen for this DE (median: each run's median log2 set to the median of the run medians).
+# --between-run auto|none|quantile|median|median_ratio (default auto; --method maxlfq only,
+#   refused with dpc): the step on the log2 MaxLFQ matrix. auto: none for a DIA-NN report DIA-NN
+#   normalised (a quantile step on top gave 61% wrong calls on the PXD063416 4 m/z benchmark),
+#   median_ratio for a --no-norm search's PG.MaxLFQ (2.15.1; quantile up to 2.15.0), none tagged
+#   [confirm] when whether DIA-NN
+#   normalised is not recorded; for an engine's declared quantities none when the declaration
+#   says the engine normalised (engine_normalised true), median_ratio otherwise ([confirm] when
+#   not recorded). quantile / median / median_ratio / none: as given, recorded as chosen for this
+#   DE (median: each run's median log2 set to the median of the run medians; median_ratio: each
+#   run shifted by its median log2 ratio to the proteins' cross-run medians, over the proteins
+#   quantified in every run).
 #   With --quantities raw only auto or none. build_maxlfq.R maxlfq_between_run() is the rule.
 #   The choice is normalization_check.py's (the experiment type's default, checked against the
 #   data); --normalization-check <its json> holds the DE to it -- and to the report and conditions
@@ -97,6 +108,19 @@ pgq_cutoff<- as.numeric(getarg("--pgq-cutoff", "0"))
 # Fraction of samples a protein must be quantified in to be TESTED (maxlfq path).
 # 0.5 matches DE-LIMP's default and the UC Davis Bioinformatics Core recommendation.
 cov_min_frac <- as.numeric(getarg("--coverage-min", "0.5"))
+# On/off proteins (maxlfq path only; onoff.R): detected in >= this many runs of one group of a
+# contrast and in none of the other's. Counted before the coverage filter. Default 2 = DE-LIMP's.
+# QuantUMS trade-off (maxlfq only; quantums_tradeoff.R): re-fits the DE at five cutoffs and writes
+# QuantUMS_tradeoff.csv. --no-quantums-tradeoff turns it off (it reads the report once, in memory).
+quantums_tradeoff_on <- !isTRUE(getarg("--no-quantums-tradeoff", FALSE))
+pgq_user_set <- !is.null(getarg("--pgq-cutoff", NULL))
+eq_user_set  <- !is.null(getarg("--eq-cutoff", NULL))
+onoff_min_n_arg <- getarg("--onoff-min-n", NULL)
+onoff_min_n <- if (is.null(onoff_min_n_arg)) 2L else suppressWarnings(as.integer(onoff_min_n_arg))
+if (is.na(onoff_min_n) || onoff_min_n < 1L) stop("--onoff-min-n must be a whole number >= 1")
+if (!is.null(onoff_min_n_arg) && !identical(method, "maxlfq"))
+  stop("--onoff-min-n applies to --method maxlfq only: limpa (--method ", method, ") infers missing ",
+       "values, so it has no on/off list.", call. = FALSE)
 outdir    <- getarg("--outdir", "de_results")
 # --logfc is a REFERENCE LINE ONLY -- it is drawn and labelled on the volcano and never
 # filters anything. Significance is the BH-adjusted p-value alone, which is the exact
@@ -107,6 +131,10 @@ outdir    <- getarg("--outdir", "de_results")
 # null, not a post-hoc cut (McCarthy & Smyth 2009).
 logfc_ref <- as.numeric(getarg("--logfc", "1.0"))
 adjp_thr  <- as.numeric(getarg("--adjp", "0.05"))
+# Whether the two cutoffs that reach the Methods were the user's (rule 2, lane3 #9): a default is
+# tagged there, never shown as a setting someone chose.
+adjp_user_set <- !is.null(getarg("--adjp", NULL))
+q_user_set    <- !is.null(getarg("--q-cutoff", NULL))
 # Contaminants (Cont_-tagged entries) are REMOVED before quantification by default --
 # see contaminants.R for the rule and why. --keep-contaminants quantifies and tests them
 # with the sample proteins instead; either way de_provenance.json records which.
@@ -227,6 +255,27 @@ local({
   f <- .sibling("compute_record.R")
   if (is.null(f))
     stop("compute_record.R not found next to run_de.R -- it defines the CPU-family record and file_sha256.")
+  source(f)
+})
+# On/off proteins (maxlfq): DE-LIMP's compute_onoff_proteins(), copied verbatim into onoff.R.
+local({
+  f <- .sibling("onoff.R")
+  if (is.null(f))
+    stop("onoff.R not found next to run_de.R -- it lists the proteins detected in one group only.")
+  source(f)
+})
+# QuantUMS trade-off table (maxlfq): the cutoffs it compares are constants in that file.
+local({
+  f <- .sibling("quantums_tradeoff.R")
+  if (is.null(f))
+    stop("quantums_tradeoff.R not found next to run_de.R -- it defines the QuantUMS trade-off table.")
+  source(f, encoding = "UTF-8")
+})
+# "Called on incomplete data": the flag columns of every DE table, on every route.
+local({
+  f <- .sibling("incomplete_data.R")
+  if (is.null(f))
+    stop("incomplete_data.R not found next to run_de.R -- it defines the incomplete-data flag.")
   source(f)
 })
 # The protein-set tests' defaults and definitions (the trigger below; run_sets.R uses the rest).
@@ -582,9 +631,10 @@ if (is.null(contrasts)) {
          "): pass --contrasts (each group minus its control), or fix that first", call. = FALSE)
   if (isTRUE(.ct$res$refused)) stop(.ct$res$message, call. = FALSE)
 }
-# A check made before 2.14.2 and a MaxLFQ DE's --between-run auto: the gate compares the step
-# that runs, known only once the report is read -- its first answer says the step it must be
-# (between_run_pending), and it is asked again then (below, after build_maxlfq)
+# A MaxLFQ DE's --between-run auto against a check made before 2.14.2, or one whose own auto
+# gave a step: the gate compares the step that runs, known only once the report is read -- its
+# first answer says the step it must be (between_run_pending), and it is asked again then
+# (below, after build_maxlfq)
 norm_check_pending <- NULL
 norm_check_rec <- if (is.null(norm_check_path)) {
   list(schema = "normalization_check", schema_version = 1L,
@@ -944,8 +994,14 @@ if (method == "dpc") {
     else "DIA-NN's cross-run normalisation (Precursor.Normalised); limpa applies none of its own",
     quantums_filter = if (length(quantums_applied)) paste(quantums_applied, collapse = " | ") else "none",
     de_engine     = "limpa::dpcDE (voomaLmFitWithImputation) -> contrasts.fit -> eBayes",
-    missing_policy = "Missing precursors modelled via the detection probability curve; not imputed, not dropped.",
-    citation      = "Li M, Cobbold SA, Smyth GK (2025) bioRxiv 10.1101/2025.04.28.651125; Li M, Smyth GK (2023) Bioinformatics 39(5):btad200"
+    # lane3 #15: "not imputed" read as "only measured values"; a run with no detected precursor
+    # of a protein does get a value -- the model's estimate (the protein screen says "inferred")
+    missing_policy = paste("Missing precursors are modelled by the detection-probability curve, not",
+                           "dropped: a protein's value in a run where none of its precursors was",
+                           "detected is a model-based estimate with a larger standard error, not a",
+                           "measurement (limpa's dpcDE carries that uncertainty into the fit)."),
+    # dpcDE fits with limma (voomaLmFitWithImputation, contrasts.fit, eBayes): limma is cited too
+    citation      = "Li M, Cobbold SA, Smyth GK (2025) bioRxiv 10.1101/2025.04.28.651125; Li M, Smyth GK (2023) Bioinformatics 39(5):btad200; limma: Ritchie ME et al. (2015) Nucleic Acids Res 43(7):e47"
   )
   filters_applied <- c(sprintf("%s <= %g", q_use, q_cuts), quantums_applied)
 
@@ -976,18 +1032,22 @@ if (method == "dpc") {
                      eq_cutoff = eq_cutoff, pgq_cutoff = pgq_cutoff,
                      keep_runs = keep_runs, drop_contaminants = !keep_contaminants,
                      contaminant_exempt = cont_exempt, quantities = quantities,
-                     no_norm = no_norm, between_run = between_run)
+                     no_norm = no_norm, between_run = between_run,
+                     tradeoff = if (quantums_tradeoff_on) quantums_cutoffs_for_run(pgq_cutoff, eq_cutoff))
   E         <- ml$E
   run_names <- colnames(E)
   genes     <- ml$genes
   descriptor <- ml$descriptor
   q_use     <- ml$q_columns
   # the gate asked again, with the between-run step that ran (norm_check_pending, above): a check
-  # made before 2.14.2 drew its volcano with another step than this one is refused here
+  # whose normalised DE drew its volcano with another step than this one is refused here (made
+  # before 2.14.2; or its --between-run auto gave another step, as auto did before 2.15.1 --
+  # --adapted-report says which old rule applied)
   if (!is.null(norm_check_pending)) {
     .ng <- python_json("normalization_check.py", "gate",
                        c(norm_check_gate_args, "--between-run-applied",
-                         shQuote(descriptor$between_run$method %||% "not recorded")),
+                         shQuote(descriptor$between_run$method %||% "not recorded"),
+                         if (!is.null(ml$declared_quantity)) "--adapted-report"),
                        "compare the between-run step with the normalisation check's")
     if (is.null(.ng$res))
       stop("the normalisation check ", norm_check_path, " could not be evaluated: ", .ng$why,
@@ -1020,26 +1080,35 @@ if (method == "dpc") {
   # those rows. Require a protein to be quantified in at least `--coverage-min`
   # of samples before testing; the rest are an on/off observation, not a
   # differential-abundance result.
+  # On/off proteins are counted on THIS matrix, before the filter below drops anything: a protein
+  # seen in 2 runs of one group and none of the other is often below --coverage-min.
+  E_pre_cov     <- E
+  genes_pre_cov <- genes
+  # Sage (2.15.1): which values rest on an identification in that run; NULL otherwise
+  ident_pre_cov <- ml$identified
+  if (!is.null(ident_pre_cov)) ident_pre_cov <- ident_pre_cov[rownames(E), colnames(E), drop = FALSE]
   n_samples     <- ncol(E)
-  min_obs       <- max(2, ceiling(cov_min_frac * n_samples))
-  n_obs_per_row <- rowSums(!is.na(E))
-  keep_cov      <- n_obs_per_row >= min_obs
-  n_dropped     <- sum(!keep_cov)
-  message(sprintf("[run_de] coverage filter: keep proteins with >= %d/%d non-NA (%.0f%%). Kept %d, dropped %d.",
-                  min_obs, n_samples, 100 * cov_min_frac, sum(keep_cov), n_dropped))
+  # the coverage rule (build_maxlfq.R coverage_rule, the one definition): all samples, or any
+  # one group -- the groups of E's columns, read from the metadata by run name
+  cov_groups    <- meta$Group[match(colnames(E), meta$File.Name)]
+  coverage_of   <- function(Ex) coverage_rule(Ex, meta$Group[match(colnames(Ex), meta$File.Name)],
+                                              cov_min_frac)
+  cov           <- coverage_rule(E, cov_groups, cov_min_frac)
+  min_obs       <- cov$min_all
+  keep_cov      <- cov$keep
+  n_dropped     <- cov$n_dropped
+  message(sprintf("[run_de] %s. Kept %d.", cov$text, cov$n_kept))
   if (sum(keep_cov) < 10)
-    stop(sprintf(paste0("Coverage filter left only %d testable proteins (needed >= %d non-NA ",
-                        "of %d samples). Loosen --coverage-min, or the QuantUMS cutoffs ",
-                        "(--eq-cutoff / --pgq-cutoff) if those are doing the damage."),
-                 sum(keep_cov), min_obs, n_samples))
+    stop(sprintf(paste0("Coverage filter left only %d testable proteins (%s). Loosen ",
+                        "--coverage-min, or the QuantUMS cutoffs (--eq-cutoff / --pgq-cutoff) if ",
+                        "those are doing the damage."), sum(keep_cov), cov$text))
   E <- E[keep_cov, , drop = FALSE]
+  ident <- if (!is.null(ident_pre_cov)) ident_pre_cov[keep_cov, , drop = FALSE]
   if (!is.null(genes) && nrow(genes) == length(keep_cov))
     genes <- genes[keep_cov, , drop = FALSE]
   # build_maxlfq() returns its filters beside the descriptor, not inside it -- reading
   # descriptor$filters_applied here used to drop every one of them from the record.
-  filters_applied <- c(ml$filters_applied,
-    sprintf("coverage >= %d/%d non-NA samples (%.0f%%); %d proteins dropped",
-            min_obs, n_samples, 100 * cov_min_frac, n_dropped))
+  filters_applied <- c(ml$filters_applied, cov$text)
   descriptor$filters_applied <- filters_applied
 }
 
@@ -1127,7 +1196,23 @@ if (!is.null(block_col)) {
 
 # ---- contrasts --------------------------------------------------------------
 forms <- contrast_forms(groups)
+# Which way each fold change points (audit L2-10): said for every contrast, and loudly when the
+# contrasts are the alphabetical default rather than the user's.
+contrasts_source <- if (!is.null(contrasts)) "--contrasts" else sprintf(paste(
+  "%s: no --contrasts was given, so every group minus the first group alphabetically (%s)"),
+  QUANTUMS_DEFAULT_TAG, levels(groups)[1])
+contrast_direction <- function(f) {
+  p <- trimws(strsplit(f, "-", fixed = TRUE)[[1]])
+  if (length(p) == 2 && all(p %in% levels(groups)))
+    sprintf("%s: positive logFC = higher in %s than in %s", f, p[1], p[2])
+  else sprintf("%s: positive logFC = the left side higher than the right", f)
+}
 message("[run_de] contrasts: ", paste(forms, collapse = ", "))
+for (.f in forms) message("[run_de]   ", contrast_direction(.f))
+if (is.null(contrasts))
+  message("[run_de] NOTE: no --contrasts given -- the default compares every group against '",
+          levels(groups)[1], "' (first alphabetically), which may not be your control. ",
+          "If the direction is not what you want, run again with --contrasts '<group>-<control>'.")
 cmat <- limma::makeContrasts(contrasts = forms, levels = design)
 
 # ---- fit --------------------------------------------------------------------
@@ -1232,6 +1317,18 @@ if (!is.null(fit_ind)) fit_ind <- limma::eBayes(limma::contrasts.fit(fit_ind, cm
 # DE tables and the DE-LIMP session read the same numbers (the session's copy with each
 # contrast's untested proteins set to NA: untest_fit, below).
 fit <- if (is.null(block)) fit_ind else block_merge_fits(.fit_blocked, fit_ind, contrast_model)
+
+# contrasts.fit is exact for ~ 0 + groups alone. With other design columns (covariates, a fixed
+# block) AND precision weights (limpa's route always) or missing values (MaxLFQ), limma documents
+# its standard errors as approximate (?contrasts.fit) -- said in the Methods, not hidden (audit
+# L2-12). The effect is usually small.
+.extra_cols <- setdiff(colnames(design), levels(groups))
+contrast_fit_note <- if (length(.extra_cols) && (method == "dpc" || anyNA(E)))
+  paste0("The design has terms besides the groups (", paste(.extra_cols, collapse = ", "),
+         ") and the fit used ", if (method == "dpc") "precision weights" else "missing values",
+         ", so limma's contrasts.fit standard errors are approximate rather than exact ",
+         "(limma's documentation); the effect is usually small.") else NULL
+if (!is.null(contrast_fit_note)) message("[run_de] note: ", contrast_fit_note)
 
 # The fitted design as text: a fixed block is a design term, a random one is not.
 design_label <- paste0("~ 0 + ", paste(c(formula_parts,
@@ -1375,17 +1472,79 @@ det_n <- if (method == "dpc" && exists("dat")) {
   .m[!is.na(.ii), ] <- as.matrix(.cnt)[.ii[!is.na(.ii)], colnames(E), drop = FALSE]
   .m
 } else {
+  # maxlfq: a value is present when the matrix limma tests has one -- identified in that run or
+  # measured by matching between runs (Sage). ONE definition of "present in a run" for the
+  # Evidence, the not-measured rule, the incomplete flag and the on/off list (2.15.1 review
+  # finding 3: on/off counted identifications while limma tested the matched values, so a
+  # protein could be on/off AND significant). A peptide with no MS1 signal (intensity 0 or
+  # missing) never makes a cell present: build_maxlfq.R drops it before the rollup (log2 of 0 is
+  # not finite), so such a cell is NA. Which values were matched is said beside it:
+  # matched_between_runs_only_in (matched_only_groups below) and the counts in the record.
   .m <- (!is.na(E)) * 1L
   dimnames(.m) <- dimnames(E)
   .m
+}
+.matched <- method == "maxlfq" && exists("ident") && !is.null(ident)
+# what a value measured by matching between runs is, as the report declared it (run_search.py
+# quotes sage_lfq_check.MATCHED_BETWEEN_RUNS into the declaration): quoted, never re-worded here
+.mbr_def <- if (.matched) {
+  .d <- if (exists("ml")) ml$declared_quantity$matched_between_runs else NULL
+  if (is.null(.d) || !nzchar(.d))
+    "not identified by MS2 in that run (the report does not say how such a value was measured)"
+  else .d
 }
 detection_rec <- list(
   file = "Detection_Matrix.csv",
   zero_means = if (method == "dpc") "inferred" else "missing",
   values = if (method == "dpc")
     "precursors observed for the protein in that run; 0 = value inferred by the DPC model"
+  else if (.matched) paste0(
+    "1 = quantified in the protein matrix: a peptide of the protein identified by MS2 in that ",
+    "run, or only peptides ", .mbr_def, " (both are tested; the DE tables' ",
+    "matched_between_runs_only_in names the groups where no value rests on an identification ",
+    "in its run); 0 = missing (NA), including a run where no peptide of the protein had MS1 ",
+    "signal (intensity 0 or missing)")
   else "1 = quantified in the protein matrix, 0 = missing (NA)",
   na_means = "protein not in the precursor matrix: status not recorded")
+# The groups (of `grp_names`) in which a protein HAS values and none of them rests on an MS2
+# identification in its run (every value measured by matching between runs): ';'-joined, "" for
+# none, NA for a protein not in the matrix. Em / Im: a protein x run matrix and its
+# Identified.In.Run matrix (same rows and columns, columns in the order of `groups`). A run with
+# no MS1 signal is NA in Em, so it is never counted as matched. The one reading of "matched
+# only", for the DE tables and the on/off list.
+MATCHED_ONLY_COLUMN <- "matched_between_runs_only_in"
+matched_only_groups <- function(Em, Im, prot, grp_names) {
+  i <- match(prot, rownames(Em))
+  hit <- vapply(grp_names, function(g) {
+    j <- which(as.character(groups) == g)
+    v <- rowSums(!is.na(Em[, j, drop = FALSE])) > 0
+    idn <- rowSums(!is.na(Im[, j, drop = FALSE]) & Im[, j, drop = FALSE]) > 0
+    (v & !idn)[i]
+  }, logical(length(prot)))
+  hit <- matrix(hit, nrow = length(prot))
+  out <- apply(hit, 1, function(h) paste(grp_names[h %in% TRUE], collapse = ";"))
+  out[is.na(i)] <- NA_character_
+  unname(out)
+}
+if (.matched) {
+  detection_rec$matched_cells <- as.integer(sum(!is.na(E) & !(ident %in% TRUE)))
+  detection_rec$quantified_cells <- as.integer(sum(!is.na(E)))
+  detection_rec$matched_definition <- .mbr_def
+  detection_rec$matched_rule <- paste0(
+    "a protein x run value with no peptide identified by MS2 in that run comes only from ",
+    "peptides ", .mbr_def, "; it is quantified and tested like any other value, and counts as ",
+    "present (Detection_Matrix.csv 1, the Evidence, the on/off list). A run where no peptide ",
+    "had MS1 signal (intensity 0 or missing) is missing (NA), never present. The DE tables' ",
+    "matched_between_runs_only_in column names, per contrast, the compared groups in which ",
+    "every value of the protein was measured by matching between runs, and OnOff_Proteins.csv's ",
+    "matched_between_runs_only says the same of the group it is present in")
+  message(sprintf(paste0("[run_de] %d of %d quantified protein x run values have no peptide ",
+                         "identified by MS2 in that run (measured by matching between runs): ",
+                         "they are tested; %s in each DE table names the groups where all ",
+                         "values were"),
+                  detection_rec$matched_cells, detection_rec$quantified_cells,
+                  MATCHED_ONLY_COLUMN))
+}
 utils::write.csv(data.frame(Protein.Group = expr_df$Protein.Group,
                             det_n[match(expr_df$Protein.Group, rownames(det_n)), , drop = FALSE],
                             check.names = FALSE),
@@ -1402,14 +1561,22 @@ utils::write.csv(data.frame(Protein.Group = expr_df$Protein.Group,
 EVIDENCE_LABELS <- c(all = "measured in both", none_in_a_group = "presence call",
                      none_measured = "not measured in either group",
                      partial = paste("partly", detection_rec$zero_means))
-detection_columns <- function(prot, grp_names) {
+# k (runs of the group in which the protein was measured) and n (runs of the group), per compared
+# group: the ONE reading of det_n, shared by Detected_<group>/Evidence and the incomplete-data flag.
+detection_counts <- function(prot, grp_names) {
   i <- match(prot, rownames(det_n))
+  k <- vapply(grp_names, function(g)
+    rowSums(det_n[i, which(as.character(groups) == g), drop = FALSE] > 0), numeric(length(prot)))
+  k <- matrix(k, nrow = length(prot), dimnames = list(prot, grp_names))
+  list(k = k, n = vapply(grp_names, function(g) sum(as.character(groups) == g), 0L))
+}
+detection_columns <- function(prot, grp_names) {
   out <- list(); k_all <- list(); n_all <- list()
+  dc <- detection_counts(prot, grp_names)
   for (g in grp_names) {
-    cols <- which(as.character(groups) == g)
-    k <- rowSums(det_n[i, cols, drop = FALSE] > 0)
-    out[[paste0("Detected_", g)]] <- ifelse(is.na(k), NA_character_, sprintf("%d/%d", k, length(cols)))
-    k_all[[g]] <- k; n_all[[g]] <- length(cols)
+    k <- dc$k[, g]
+    out[[paste0("Detected_", g)]] <- ifelse(is.na(k), NA_character_, sprintf("%d/%d", k, dc$n[[g]]))
+    k_all[[g]] <- k; n_all[[g]] <- dc$n[[g]]
   }
   kk <- do.call(cbind, k_all); nn <- matrix(unlist(n_all), nrow(kk), length(n_all), byrow = TRUE)
   ev <- ifelse(rowSums(kk) == 0, EVIDENCE_LABELS[["none_measured"]],
@@ -1423,6 +1590,13 @@ detection_rec$de_columns <- list(
   `Detected_<group>` = sprintf(paste0("k/n: the runs of that group (n) in which the protein was ",
                                       "measured (k; Detection_Matrix.csv > 0, 0 = %s)"),
                                detection_rec$zero_means),
+  values_per_group = paste0("the same counts as Detected_<group>, in one string: '<group> k/n; ...' for ",
+                            "every group the contrast compares"),
+  called_on_incomplete_data = paste0("significant (adj.P.Val < the threshold) AND some compared group has ",
+                                     "fewer than all its runs measured: TRUE; significant with every run ",
+                                     "measured: FALSE; not significant: NA"),
+  incomplete_tier = paste0("significant calls only: 'complete', 'incomplete', or 'single_sample' (a group ",
+                           "of several runs in which the protein was measured in one only)"),
   Evidence = sprintf(paste0("'%s' = measured in every run of every group in the contrast; '%s' = ",
                             "never measured in at least one group but measured in another, so the ",
                             "difference there is the model's, not a measurement; '%s' = measured in ",
@@ -1467,6 +1641,13 @@ untest_not_measured <- function(tt) {
   tt
 }
 
+incomplete_rec <- list(
+  columns = list("values_per_group", "called_on_incomplete_data", "incomplete_tier"),
+  rule = incomplete_rule_text(detection_rec$zero_means),
+  measured = detection_rec$values, zero_means = detection_rec$zero_means,
+  call_rule = sprintf("adj.P.Val < %g (Benjamini-Hochberg); no fold-change filter", adjp_thr),
+  benchmark = INCOMPLETE_BENCHMARK, benchmark_text = incomplete_benchmark_text(),
+  citation = INCOMPLETE_BENCHMARK$citation)
 all_sig <- list()
 de_tables <- list()   # per DE table: its file and which fit it was reported from
 not_measured_ids <- list()   # per contrast: the proteins it does not test (the DE-LIMP session's NAs)
@@ -1484,7 +1665,11 @@ for (cn in forms) {
   .cg <- intersect(c(rownames(cmat)[cmat[, cn] > 0], rownames(cmat)[cmat[, cn] < 0]), levels(groups))
   if (length(.cg)) {
     tt <- cbind(tt, detection_columns(tt$Protein.Group, .cg))
+    if (.matched) tt[[MATCHED_ONLY_COLUMN]] <- matched_only_groups(E, ident, tt$Protein.Group, .cg)
     tt <- untest_not_measured(tt)
+    # the incomplete-data flag, from the finished adj.P.Val and the DE's own call rule (below)
+    .dc <- detection_counts(tt$Protein.Group, .cg)
+    tt <- cbind(tt, incomplete_flag_table(.dc$k, .dc$n, .cg, !is.na(tt$adj.P.Val) & tt$adj.P.Val < adjp_thr))
   }
   tt <- tt[order(tt$adj.P.Val), ]
   fn <- file.path(outdir, sprintf("DE_%s_%s.csv", method, make.names(cn)))
@@ -1504,7 +1689,176 @@ for (cn in forms) {
                   if (is.null(block)) "" else sprintf("  [%s fit]", contrast_model[[cn]])))
   de_tables[[cn]] <- list(file = basename(fn), model = contrast_model[[cn]], n_significant = nrow(sig),
                           n_proteins = nrow(tt), n_tested = n_tested,
-                          n_not_measured = as.integer(n_not_measured))
+                          n_not_measured = as.integer(n_not_measured),
+                          # significant calls flagged by the incomplete-data columns (NA flag = none)
+                          n_called_incomplete = if ("called_on_incomplete_data" %in% names(tt))
+                            as.integer(sum(tt$called_on_incomplete_data %in% TRUE)) else NULL,
+                          n_called_single_sample = if ("incomplete_tier" %in% names(tt))
+                            as.integer(sum(tt$incomplete_tier %in% INCOMPLETE_TIERS[["single"]])) else NULL)
+}
+
+# ---- on/off proteins (maxlfq only): OnOff_Proteins.csv ---------------------------------
+# Detected in one group of a contrast and absent from the other: no logFC from limma, and often
+# dropped by the coverage filter first -- so counted on the matrix BEFORE that filter
+# (E_pre_cov). Only simple A-B contrasts; the others are skipped WITH the reason (onoff_rec).
+# A failure is recorded in the record and said on screen, never swallowed (rule 4); the
+# session's MANIFEST.txt line is made from this record (session.py onoff_step).
+onoff_rec <- NULL
+if (method == "maxlfq") {
+  onoff_rec <- list(file = "OnOff_Proteins.csv", status = "written", n_min = onoff_min_n,
+                    rule = onoff_rule_text(onoff_min_n),
+                    n_min_unit = "run", collapsed_runs_to_samples = FALSE,
+                    unit_source = "no Sample column in the conditions: each run is counted as a sample",
+                    matrix = "protein matrix before the coverage filter",
+                    n_proteins_in_matrix = nrow(E_pre_cov),
+                    contrasts = list(), skipped = list())
+  tryCatch({
+    .cp <- onoff_contrast_pairs(cmat, levels(groups))
+    .annot <- if (!is.null(genes_pre_cov) && "Genes" %in% names(genes_pre_cov)) {
+      data.frame(Protein.Group = if ("Protein.Group" %in% names(genes_pre_cov))
+                   as.character(genes_pre_cov$Protein.Group) else rownames(genes_pre_cov),
+                 Genes = as.character(genes_pre_cov$Genes), stringsAsFactors = FALSE)
+    } else NULL
+    # Counted per SAMPLE where the conditions name samples (the Sample column: injections of one
+    # sample are technical replicates, TECH_REPLICATE_COLUMN above): a sample is detected if any of
+    # its runs has a value. No Sample column -> per run, and the record and the rule say so.
+    .has_smp <- TECH_REPLICATE_COLUMN %in% names(meta)
+    # present = a value in the matrix limma tests (Detection_Matrix.csv's one definition): a value
+    # measured by matching between runs counts, one with no MS1 signal does not (it is NA), so a
+    # protein on this list never has a fold change for the same contrast (2.15.1 review finding
+    # 3); matched_between_runs_only flags it below
+    .cs <- onoff_collapse_samples(E_pre_cov, groups, if (.has_smp) meta[[TECH_REPLICATE_COLUMN]] else NULL)
+    if (.has_smp) {
+      onoff_rec$n_min_unit <- "sample"
+      onoff_rec$collapsed_runs_to_samples <- .cs$collapsed
+      onoff_rec$unit_source <- if (.cs$collapsed)
+        sprintf("conditions' %s column: %d runs collapsed to %d samples", TECH_REPLICATE_COLUMN,
+                .cs$n_runs, .cs$n_samples)
+      else sprintf("conditions' %s column: one run per sample, nothing to collapse", TECH_REPLICATE_COLUMN)
+    }
+    onoff_rec$n_runs <- .cs$n_runs; onoff_rec$n_samples <- .cs$n_samples
+    onoff_rec$rule <- onoff_rule_text(onoff_min_n, onoff_rec$n_min_unit, .cs$collapsed)
+    .ot <- onoff_table(.cs$E, .cs$group, .cp$pairs, n_min = onoff_min_n, annot = .annot)
+    if (!is.null(ident_pre_cov)) {
+      # the group it is present in: were all its values there measured by matching between runs
+      # (no MS2 identification of the protein in any of its runs)?
+      .pres <- sub("_only$", "", .ot$Direction)
+      .ot$matched_between_runs_only <- if (nrow(.ot)) vapply(seq_len(nrow(.ot)), function(r)
+        identical(matched_only_groups(E_pre_cov, ident_pre_cov, .ot$Protein.Group[r], .pres[r]),
+                  .pres[r]), logical(1)) else logical(0)
+      onoff_rec$presence <- paste0("a value in the protein matrix, as in the DE tables: a value ",
+                                   "from peptides ", .mbr_def, " counts as present; a run with ",
+                                   "no MS1 signal (intensity 0 or missing) counts as absent; ",
+                                   "matched_between_runs_only = TRUE when every value in the ",
+                                   "group the protein is present in was measured by matching ",
+                                   "between runs")
+      onoff_rec$rule <- paste0(onoff_rec$rule, " A value measured by matching between runs ",
+                               "counts as present (it is what the DE tests) and a run with no ",
+                               "MS1 signal counts as absent; matched_between_runs_only marks a ",
+                               "protein whose values in its group were all measured by matching ",
+                               "between runs.")
+    }
+    utils::write.csv(.ot, file.path(outdir, "OnOff_Proteins.csv"), row.names = FALSE)
+    # per contrast (limma's own name for it): the groups, how many of each direction, and how many
+    # of those the coverage filter had dropped before limma (so would never have been listed)
+    .kept <- rownames(E)
+    for (cn in names(.cp$pairs)) {
+      .pr <- .cp$pairs[[cn]]
+      .rows <- .ot[.ot$Contrast == paste0(.pr[1], " - ", .pr[2]), , drop = FALSE]
+      onoff_rec$contrasts[[cn]] <- list(
+        group_1 = .pr[1], group_2 = .pr[2], n_onoff = nrow(.rows),
+        n_only_group_1 = sum(.rows$Direction == paste0(.pr[1], "_only")),
+        n_only_group_2 = sum(.rows$Direction == paste0(.pr[2], "_only")),
+        n_dropped_by_coverage_filter = sum(!.rows$Protein.Group %in% .kept))
+    }
+    for (cn in names(.cp$skipped)) onoff_rec$skipped[[cn]] <- .cp$skipped[[cn]]
+    onoff_rec$n_onoff_total <- nrow(.ot)
+    if (!length(.cp$pairs)) onoff_rec$status <- "no_simple_contrasts"
+    message(sprintf("[run_de] OnOff_Proteins.csv: %d on/off proteins (detected in >= %d runs of one group, none of the other) over %d contrast(s)%s",
+                    nrow(.ot), onoff_min_n, length(.cp$pairs),
+                    if (length(.cp$skipped)) sprintf("; %d contrast(s) skipped (not a simple A-B)", length(.cp$skipped)) else ""))
+  }, error = function(e) {
+    onoff_rec$status <<- "failed"
+    onoff_rec$reason <<- conditionMessage(e)
+    warning("on/off proteins NOT written (OnOff_Proteins.csv): ", conditionMessage(e), call. = FALSE)
+  })
+}
+
+# The missing-value policy's on/off sentence, from what was actually written (audit L2-1): the
+# descriptor's own text says nothing about on/off proteins, so a run whose table failed, or that
+# had no simple A-B contrast, never claims them.
+if (!is.null(onoff_rec)) {
+  descriptor$missing_policy <- paste(descriptor$missing_policy, if (identical(onoff_rec$status, "written"))
+    sprintf(paste("Proteins quantified in at least %d %ss of one group of a simple A-B contrast and",
+                  "in none of the other's are listed in %s as on/off calls (no fold change)."),
+            onoff_rec$n_min, onoff_rec$n_min_unit %||% "run", onoff_rec$file)
+  else if (identical(onoff_rec$status, "no_simple_contrasts"))
+    "No on/off list: no contrast is a simple A-B comparison of two groups."
+  else sprintf("The on/off list was NOT written (%s).", onoff_rec$reason %||% "no reason recorded"))
+}
+
+# ---- QuantUMS trade-off (maxlfq only): QuantUMS_tradeoff.csv -----------------------------------
+# The DE re-fitted at pgQ/eQ none / 0.5 / 0.75 / 0.75+0.75 / 0.85 with this run's design, contrasts,
+# block, coverage filter and call rule (quantums_tradeoff.R). Shown, never applied: the cutoffs the
+# run used are marked and tagged DEFAULT when the user set none; the defaults are unchanged. dpc is
+# skipped (pgQ deletes cells limpa imputes back); a report without QuantUMS columns is skipped with
+# the reason; a failure is recorded -- the session's MANIFEST.txt line is made from this record.
+quantums_rec <- NULL
+if (method == "dpc") {
+  quantums_rec <- list(status = "skipped", file = "QuantUMS_tradeoff.csv",
+    reason = paste("limpa (--method dpc): a pgQ cutoff deletes whole protein x run cells that limpa's",
+                   "detection model then imputes back, so the cutoffs are not comparable on this route"))
+} else if (!quantums_tradeoff_on) {
+  quantums_rec <- list(status = "skipped", file = "QuantUMS_tradeoff.csv",
+                       reason = "--no-quantums-tradeoff was given")
+} else {
+  quantums_rec <- list(status = "written", file = "QuantUMS_tradeoff.csv",
+    used = list(pgQ = pgq_cutoff, eQ = eq_cutoff),
+    cutoff_source = quantums_source_text(pgq_user_set, eq_user_set),
+    cutoffs = lapply(QUANTUMS_TRADEOFF_CUTOFFS, function(c) list(label = c$label, pgQ = c$pgq, eQ = c$eq)),
+    recommended = list(label = "pgQ 0.75 + eQ 0.75", tag = QUANTUMS_RECOMMENDED$tag,
+                       citation = QUANTUMS_RECOMMENDED$citation),
+    defaults_unchanged = paste("the skill's own cutoffs are unchanged (pgQ and eQ off unless given): the",
+                               "QuantUMS cutoff is the user's choice and the table only shows what it costs"),
+    call_rule = sprintf("adj.P.Val < %g (Benjamini-Hochberg), as the DE tables", adjp_thr),
+    coverage = paste0(sub("; [0-9]+ proteins dropped.*$", "", cov$text), ", as the DE"))
+  tryCatch({
+    if (!is.null(ml$tradeoff_skip)) {
+      quantums_rec$status <- "skipped"; quantums_rec$reason <- ml$tradeoff_skip
+    } else {
+      # the run's own fit, on another matrix: same design, contrasts, block (blocking.R's merge)
+      refit_maxlfq <- function(Ec) {
+        fit_i <- function() limma::lmFit(Ec, design)
+        one <- function(f) limma::eBayes(limma::contrasts.fit(f, cmat))
+        f <- if (is.null(block)) one(fit_i())
+        else {
+          fb <- if (identical(block_rec$effect, "fixed")) fit_i() else {
+            dc <- limma::duplicateCorrelation(Ec, design, block = block)
+            limma::lmFit(Ec, design, block = block, correlation = dc$consensus.correlation)
+          }
+          fi <- if (any(contrast_model == "independent")) one(fit_i()) else NULL
+          block_merge_fits(one(fb), fi, contrast_model)
+        }
+        setNames(lapply(forms, function(cn) {
+          tt <- limma::topTable(f, coef = cn, number = Inf, adjust.method = "BH")
+          tt[, "P.Value", drop = FALSE]
+        }), forms)
+      }
+      tab <- quantums_tradeoff_table(ml$tradeoff, colnames(E), function(Ec) coverage_of(Ec)$keep,
+                                     cmat, groups, adjp_thr,
+                                     used = c(pgq_cutoff, eq_cutoff), source = quantums_rec$cutoff_source,
+                                     refit_fn = refit_maxlfq)
+      utils::write.csv(tab, file.path(outdir, "QuantUMS_tradeoff.csv"), row.names = FALSE,
+                       fileEncoding = "UTF-8")
+      quantums_rec$table <- lapply(seq_len(nrow(tab)), function(i) as.list(tab[i, ]))
+      quantums_rec$n_rows <- nrow(tab)
+      message(sprintf("[run_de] QuantUMS_tradeoff.csv: %d cutoff set(s) x %d contrast(s); used: %s",
+                      length(ml$tradeoff), length(forms), quantums_rec$cutoff_source))
+    }
+  }, error = function(e) {
+    quantums_rec$status <<- "failed"; quantums_rec$reason <<- conditionMessage(e)
+    warning("QuantUMS trade-off table NOT written (QuantUMS_tradeoff.csv): ", conditionMessage(e), call. = FALSE)
+  })
 }
 
 # ---- protein-set test inputs (run_sets.R) ----------------------------------------
@@ -1596,6 +1950,39 @@ if (is.null(.rs)) {
 }
 
 # ---- methods + reproducibility provenance -----------------------------------
+# The incomplete-data flag's lines (every route) and the QuantUMS trade-off's (maxlfq), from their records.
+incomplete_methods_lines <- function(r, tabs) {
+  pad <- strrep(" ", 16)
+  per <- paste(sprintf("%s %d of %d", names(tabs),
+                       vapply(tabs, function(t) t$n_called_incomplete %||% 0L, 0L),
+                       vapply(tabs, function(t) t$n_significant, 0L)), collapse = ", ")
+  c(sprintf("Incomplete    : %s", r$rule),
+    sprintf("%sSignificant calls on incomplete data, per contrast: %s.", pad, per),
+    sprintf("%s%s", pad, r$benchmark_text))
+}
+quantums_methods_lines <- function(r) {
+  pad <- strrep(" ", 16)
+  if (!identical(r$status, "written"))
+    return(sprintf("QuantUMS      : trade-off table NOT written (%s): %s", r$status, r$reason %||% "no reason recorded"))
+  c(sprintf("QuantUMS      : %s compares the DE at pgQ/eQ none, 0.5, 0.75, 0.75+0.75, 0.85 (same design, contrasts, coverage filter and call rule). Used here: pgQ %g, eQ %g (%s).",
+            r$file, r$used$pgQ, r$used$eQ, r$cutoff_source),
+    sprintf("%sRecommended on the benchmark: pgQ 0.75 + eQ 0.75 (%s): %s. %s.", pad, r$recommended$tag,
+            r$recommended$citation, r$defaults_unchanged))
+}
+# The on/off record's lines for methods.txt (maxlfq only), from the record itself.
+onoff_methods_lines <- function(r) {
+  pad <- strrep(" ", 16)
+  if (!identical(r$status, "written") && !identical(r$status, "no_simple_contrasts"))
+    return(sprintf("On/off        : NOT WRITTEN -- %s", r$reason %||% "no reason recorded"))
+  per <- paste(sprintf("%s %d", names(r$contrasts), vapply(r$contrasts, function(t) t$n_onoff, 0L)),
+               collapse = ", ")
+  c(sprintf("On/off        : %s (%s) lists them separately, not as fold changes: %s",
+            r$file, sprintf("min. %d %ss", r$n_min, r$n_min_unit %||% "run"), r$rule),
+    if (!is.null(r$unit_source)) sprintf("%sCounted per %s: %s.", pad, r$n_min_unit %||% "run", r$unit_source),
+    if (length(r$contrasts)) sprintf("%sOn/off proteins per contrast: %s.", pad, per),
+    if (length(r$skipped)) sprintf("%sSkipped (not a simple A-B contrast): %s.", pad,
+                                   paste(names(r$skipped), collapse = ", ")))
+}
 # The normalisation check's lines (normalization_check.py's record), or NOT RUN, tagged.
 norm_check_methods_lines <- function(r) {
   pad <- strrep(" ", 16)
@@ -1702,7 +2089,8 @@ methods_txt <- c(
   # the numeric cutoff whenever the report's q-columns are real (DIA-NN; Radiant's Fulcrum q),
   # never for placeholder columns it cannot touch
   if (is.null(descriptor$identification_fdr) || identical(descriptor$q_columns_role, "real"))
-    sprintf("ID FDR cutoff : q <= %.3f", q_cutoff),
+    sprintf("ID FDR cutoff : q <= %.3f%s", q_cutoff,
+            if (q_user_set) "" else sprintf(" (%s)", QUANTUMS_DEFAULT_TAG)),
   sprintf("Filters       : %s", if (length(filters_applied)) filters_applied[1] else "none"),
   if (length(filters_applied) > 1) sprintf("                %s", filters_applied[-1]),
   contaminant_methods_lines(cont_rec),
@@ -1715,7 +2103,11 @@ methods_txt <- c(
   covariate_methods_lines(covariates_rec),
   block_methods_lines(block_rec),
   sprintf("Contrasts     : %s", paste(forms, collapse = ", ")),
-  sprintf("Significance  : adj.P.Val < %.3g (Benjamini-Hochberg), moderated t-test of", adjp_thr),
+  sprintf("                %s", vapply(forms, contrast_direction, "")),
+  if (is.null(contrasts)) sprintf("                (%s)", contrasts_source),
+  if (!is.null(contrast_fit_note)) sprintf("                %s", contrast_fit_note),
+  sprintf("Significance  : adj.P.Val < %.3g%s (Benjamini-Hochberg), moderated t-test of", adjp_thr,
+          if (adjp_user_set) "" else sprintf(" (%s)", QUANTUMS_DEFAULT_TAG)),
   "                H0: log2 fold change = 0. No fold-change filter is applied --",
   sprintf("                |log2FC| = %.3g is drawn on the volcano for reference only, so", logfc_ref),
   "                the reported error rate matches the hypothesis actually tested.",
@@ -1725,6 +2117,9 @@ methods_txt <- c(
   sprintf("                %s.", paste(sprintf("%s %d", names(de_tables),
                                                vapply(de_tables, function(t) t$n_not_measured, 0L)),
                                        collapse = ", ")),
+  if (!is.null(onoff_rec)) onoff_methods_lines(onoff_rec),
+  incomplete_methods_lines(incomplete_rec, de_tables),
+  if (!is.null(quantums_rec)) quantums_methods_lines(quantums_rec),
   "",
   sprintf("Citation      : %s", descriptor$citation),
   if (!is.null(descriptor$caveat)) c("", sprintf("Caveat        : %s", descriptor$caveat))
@@ -1858,6 +2253,16 @@ prov <- list(
   filters_applied = as.list(filters_applied),
   contaminants = cont_rec,
   logfc = logfc_ref, logfc_role = "reference_line_only", adjp = adjp_thr,
+  # where the two cutoffs the Methods state came from: the user's flag, or the default, tagged
+  adjp_source = if (adjp_user_set) "--adjp" else QUANTUMS_DEFAULT_TAG,
+  q_cutoff_source = if (q_user_set) "--q-cutoff" else QUANTUMS_DEFAULT_TAG,
+  # which way each contrast's fold change points, and whether the contrasts were given
+  # {contrast: which way positive logFC points}
+  contrast_directions = as.list(setNames(sub("^.*?: ", "", vapply(forms, contrast_direction, ""), perl = TRUE),
+                                         forms)),
+  contrasts_source = contrasts_source,
+  # limma's contrasts.fit is approximate for this design (NULL when it is exact)
+  contrast_fit_note = contrast_fit_note,
   significance_rule = "adj.P.Val < adjp (BH); no fold-change filter",
   design = design_label,
   # the design as requested before fitting (formula, numeric covariates, block, contrasts, the
@@ -1882,6 +2287,20 @@ prov <- list(
   # in neither compared group (n_not_measured -- the rule is `not_measured`).
   de_tables = de_tables,
   not_measured = not_measured_rec,
+  # every route: the incomplete-data flag columns of the DE tables (incomplete_data.R) -- the rule,
+  # what "measured" means on this route, the benchmark that justifies the flag, the cite, and the
+  # per-contrast counts (also in de_tables n_called_incomplete / n_called_single_sample)
+  incomplete_data = incomplete_rec,
+  # maxlfq: the on/off proteins (OnOff_Proteins.csv): the rule, n_min, per-contrast counts, the
+  # contrasts skipped and why; status "failed" + reason if the table could not be made. NULL on dpc
+  # (limpa infers missing values, so there is no such list).
+  onoff = onoff_rec,
+  # maxlfq: the coverage rule as applied (build_maxlfq.R coverage_rule): the minimum over all
+  # samples and per group, how many were dropped and how many only the per-group rule kept
+  coverage = if (method == "maxlfq") cov[setdiff(names(cov), "keep")] else NULL,
+  # maxlfq: the QuantUMS trade-off (QuantUMS_tradeoff.csv): cutoffs compared, the row used and where it
+  # came from, the recommended row and its citation, the table; skipped/failed + reason otherwise
+  quantums_tradeoff = quantums_rec,
   # Detection_Matrix.csv: what each 0 means depends on the pipeline -- say it here.
   detection_matrix = detection_rec,
   # Protein-set tests: the inputs file run_sets.R reads, and the contrasts it is suggested for

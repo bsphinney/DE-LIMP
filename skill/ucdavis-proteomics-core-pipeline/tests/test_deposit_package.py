@@ -393,7 +393,9 @@ class FullSession(unittest.TestCase):
         self.assertIn("Oxidation (M)", secs["Database search"])
         self.assertIn("1% FDR", secs["Database search"])
         self.assertIn("UniProt Homo sapiens reference proteome", secs["Sequence database"])
-        self.assertIn("Howard Hughes Medical Institute", secs["Acknowledgments"])
+        # a session with no Core record: the Core's grant is not printed (2.15.1), a blank is
+        self.assertNotIn("Howard Hughes Medical Institute", secs["Acknowledgments"])
+        self.assertIn("add your own facility's", secs["Acknowledgments"])
         self.assertIn("[facility default — confirm]", text)       # defaults stay tagged
 
     def test_de_paragraph_states_no_fold_change_filter(self):

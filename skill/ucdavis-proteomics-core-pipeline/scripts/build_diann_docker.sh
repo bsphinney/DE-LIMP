@@ -55,7 +55,20 @@ fi
 # asset filename and never by release tag.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/diann_release.sh"
+. "$SCRIPT_DIR/verify_download.sh"
+GH_ERR_FILE="$(mktemp)"; export GH_ERR_FILE
+trap 'rm -f "$GH_ERR_FILE"' EXIT
 URL="$(diann_asset_url "$VER" Linux)"
+if [ -z "$URL" ] && [ "$VER" != "latest" ] && [ -s "$GH_ERR_FILE" ]; then
+  # GitHub's API could not answer; a pinned 2.x build has a fixed address (diann_release.sh)
+  echo "[diann-docker] $(cat "$GH_ERR_FILE"); using the pinned build's fixed address." >&2
+  URL="https://github.com/vdemichev/DiaNN/releases/download/2.0/DIA-NN-$VER-Academia-Linux.zip"
+fi
+if [ -z "$URL" ] && [ -s "$GH_ERR_FILE" ]; then
+  echo "[diann-docker] Could not look up DIA-NN '$VER': $(cat "$GH_ERR_FILE")." >&2
+  echo "  Nothing was downloaded. Try again, or set GITHUB_TOKEN." >&2
+  exit 5
+fi
 if [ -z "$URL" ]; then
   echo "[diann-docker] No DIA-NN Academia-Linux build named '$VER' exists." >&2
   echo "  Check the version against https://github.com/vdemichev/DiaNN/releases (free for academics)," >&2
@@ -75,7 +88,14 @@ if [ -n "$GOT" ] && [ "$GOT" != "$VER" ]; then
 fi
 
 echo "[diann-docker] downloading $URL"
-curl -fsSL "$URL" -o "$WORK/diann.zip" && (cd "$WORK" && unzip -oq diann.zip)
+rm -f "$WORK/diann.zip.part"
+if ! curl -fsSL "$URL" -o "$WORK/diann.zip.part"; then
+  rm -f "$WORK/diann.zip.part"; echo "[diann-docker] The download failed or was cut short. Nothing was built." >&2; exit 8
+fi
+# against the sha256 the vendor published for this build (pinned_checksums.txt); a mismatch stops here
+verify_download "diann-${VER}-linux" "$WORK/diann.zip.part" "DIA-NN $VER" ; vrc=$?
+if [ "$vrc" = 1 ]; then rm -f "$WORK/diann.zip.part"; echo "[diann-docker] The zip does not match the published checksum, so it was deleted and nothing was built." >&2; exit 9; fi
+mv -f "$WORK/diann.zip.part" "$WORK/diann.zip" && (cd "$WORK" && unzip -oq diann.zip) || { echo "[diann-docker] The zip could not be unpacked. Nothing was built." >&2; exit 8; }
 
 # DIA-NN's zip ships a Dockerfile (and make_docker.sh). Build from it directly.
 DF="$(find "$WORK" -iname Dockerfile -type f | head -n1)"
@@ -85,7 +105,9 @@ if [ -z "$DF" ]; then
 fi
 CTX="$(dirname "$DF")"
 echo "[diann-docker] building $TAG from $DF (this takes a few minutes the first time)..."
-if docker build -t "$TAG" -f "$DF" "$CTX"; then
+# --platform linux/amd64: DIA-NN has no arm64 build; on Apple Silicon the image is built (and run,
+# see diann_docker.sh) as amd64 under emulation. Without it the image is built for the host.
+if docker build --platform linux/amd64 -t "$TAG" -f "$DF" "$CTX"; then
   echo "$TAG" > "$PP_HOME/diann_docker_image"
   echo "[diann-docker] built $TAG  ->  recorded in $PP_HOME/diann_docker_image"
   echo "[diann-docker] re-source activate.sh so DIANN_DOCKER_IMAGE is exported."

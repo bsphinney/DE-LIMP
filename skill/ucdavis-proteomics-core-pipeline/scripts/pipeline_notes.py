@@ -113,7 +113,7 @@ FACTS = [
      "why searches carry a fixed +57 Da carbamidomethyl modification. Forgetting it costs "
      "most of your cysteine-containing peptides.",
      "Standard bottom-up sample preparation", None),
-    ("A protein's abundance in a cell can span roughly ten orders of magnitude. No single "
+    ("In one human cell line, the quantified proteins span about seven orders of magnitude, up to 20 million copies per cell. No single "
      "mass-spec run sees all of it at once — depth is always a compromise with time.",
      "Beck et al. 2011, Mol Syst Biol 7:549", None),
 ]

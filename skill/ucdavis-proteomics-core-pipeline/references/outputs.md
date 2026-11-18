@@ -6,16 +6,16 @@ Every run is packaged into a tidy **session directory** so people can find thing
 **Contents** (section: line)
 - 21: Where the session goes — ask the user
 - 33: Session layout (`session.py`)
-- 326: Re-analysis of the same dataset
-- 357: Comparing analyses (`compare_analyses.R`)
-- 377: 1b. A prior analysis: a new session is fresh (step 1b)
-- 389: 1b. A re-analysis, only when the user asks for one (step 1b)
-- 398: 3b. Creating the analysis session (step 3b)
-- 488: 11. The output-files report (step 11)
-- 509: 11b. A re-analysis: compare to the original (step 11b)
-- 526: Golden rule 16: stay on the standard path; the finish steps always run
-- 546: 12. Finalize the session, and the summary to the user (step 12)
-- 652: Keeping the record of the analysis: the decisions log and the conversation
+- 333: Re-analysis of the same dataset
+- 364: Comparing analyses (`compare_analyses.R`)
+- 384: 1b. A prior analysis: a new session is fresh (step 1b)
+- 396: 1b. A re-analysis, only when the user asks for one (step 1b)
+- 405: 3b. Creating the analysis session (step 3b)
+- 495: 11. The output-files report (step 11)
+- 516: 11b. A re-analysis: compare to the original (step 11b)
+- 533: Golden rule 16: stay on the standard path; the finish steps always run
+- 553: 12. Finalize the session, and the summary to the user (step 12)
+- 659: Keeping the record of the analysis: the decisions log and the conversation
 <!-- /contents -->
 
 ## Where the session goes — ask the user
@@ -54,7 +54,10 @@ The orchestrator asks where results should live (SKILL.md step 3b):
     tables/                 # DE_<method>_<contrast>.csv (one per comparison), Expression_Matrix.csv,
                             #   Detection_Matrix.csv (per protein x run: DPC = precursors
                             #   observed, 0 = inferred; MaxLFQ = 1/0 quantified/missing; which
-                            #   applies is de_provenance.json detection_matrix), QC_detected_vs_inferred.csv,
+                            #   applies is de_provenance.json detection_matrix), OnOff_Proteins.csv (MaxLFQ
+                            #   only: proteins in one group of a contrast and none of the other),
+                            #   QuantUMS_tradeoff.csv (MaxLFQ only: the DE at five QuantUMS cutoffs),
+                            #   QC_detected_vs_inferred.csv,
                             #   QC_contaminant_share.csv + contaminants_removed.csv (the Cont_
                             #   filter), methods.txt, sessionInfo.txt, de_provenance.json,
                             #   DE-LIMP_session.rds (DPC runs: load it in the DE-LIMP app), and
@@ -193,6 +196,10 @@ The orchestrator asks where results should live (SKILL.md step 3b):
   after the hook, like `MANIFEST.txt`.
 
 ### The DE tables (`output/tables/DE_<method>_<contrast>.csv`, `run_de.R`)
+**These are the results of record** (with `Expression_Matrix.csv`): the protein values and
+statistics the report, Methods and audit use. The search engine's own protein matrix (DIA-NN's
+`report.pg_matrix.tsv`, an adapter's `report.parquet`) is a different summary, kept for
+reference; a delivery README says so where it lists the files (`core_submission.py`).
 One row per protein, sorted by `adj.P.Val`. limma's columns (`logFC`, `AveExpr`, `t`,
 `P.Value`, `adj.P.Val` — THE significance column —, `B`), the protein annotation
 (`Protein.Group`, `Genes`, `Protein.Names`, and on dpc limpa's precursor count `NPrec` (limpa ≥ 1.4;

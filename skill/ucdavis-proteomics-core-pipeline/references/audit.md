@@ -3,17 +3,18 @@
 New users make predictable proteomics mistakes that invalidate the results. The
 skill runs `audit_results.py` after DE to catch them deterministically (grounded in
 the real data — never guessed) and **surfaces every issue to the user** before they
-over-interpret anything. FAILs should stop interpretation; WARNs go in the report's
-"Audit & caveats" section.
+over-interpret anything. FAILs should stop interpretation; WARNs reach the report's
+"Audit & caveats" table, which `make_analysis_html.py` adds (do not write that section
+yourself: analysis.md "9.").
 
 <!-- contents: tests/test_skill_structure.py --toc -->
 **Contents** (section: line)
-- 19: What it checks
-- 38: What the client reads: a plain-language table
-- 57: How the orchestrator uses it
-- 69: Why deterministic, not LLM-judged
-- 77: Tuning
-- 85: 8c. The audit and the sample-quality check (step 8c)
+- 20: What it checks
+- 39: What the client reads: a plain-language table
+- 58: How the orchestrator uses it
+- 70: Why deterministic, not LLM-judged
+- 78: Tuning
+- 86: 8c. The audit and the sample-quality check (step 8c)
 <!-- /contents -->
 
 ## What it checks

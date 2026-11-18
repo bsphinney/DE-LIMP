@@ -348,6 +348,14 @@ class UpdateOverHttps(Harness):
         # the catalogue is still a fast-forward of GitHub's main, nothing rewritten
         self.assertEqual(self.git("-C", self.market, "rev-parse", "HEAD"),
                          self.git("--git-dir", self.github, "rev-parse", "main"))
+        # 2.15.1: the update names the commit it came from and the one it went to, and logs them
+        self.assertEqual(j["commit_after"], self.git("--git-dir", self.github, "rev-parse", "main"))
+        self.assertRegex(j["commit_before"], r"^[0-9a-f]{40}$")
+        self.assertNotEqual(j["commit_before"], j["commit_after"])
+        with open(os.path.join(self.d, "skill_config", "skill_updates.log")) as fh:
+            line = fh.read().splitlines()[-1]
+        self.assertIn(f"2.10.0 -> 2.11.2", line)
+        self.assertIn(j["commit_after"], line)
         # and now the check agrees, once the new copy runs
         self.running_copy("2.11.2")
         self.assertEqual(self.sv(0, "--check-update")["status"], "current")

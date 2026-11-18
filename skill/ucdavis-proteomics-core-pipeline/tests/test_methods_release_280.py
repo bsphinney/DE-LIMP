@@ -81,7 +81,8 @@ class Acknowledgment(unittest.TestCase):
 
     def test_a_renamed_timstof_run_gets_the_timstof_acknowledgment(self):
         with tempfile.TemporaryDirectory() as tmp:
-            text, params = run_methods(tmp, [make_timstof_d(os.path.join(tmp, "FLAG_IP_1.d"))])
+            text, params = run_methods(tmp, [make_timstof_d(os.path.join(tmp, "FLAG_IP_1.d"))],
+                                       "--acquired-at-core")
             ack = section(text, "Acknowledgments")
             self.assertIn("Howard Hughes Medical Institute", ack)
             self.assertNotIn("S10OD021801", ack)
@@ -99,7 +100,7 @@ class Acknowledgment(unittest.TestCase):
 
     def test_a_facility_raw_is_named_by_prefix_as_a_guess(self):
         with tempfile.TemporaryDirectory() as tmp:
-            r = run(tmp, [touch(os.path.join(tmp, "FL20260101_a.raw"))])
+            r = run(tmp, [touch(os.path.join(tmp, "FL20260101_a.raw"))], "--acquired-at-core")
             self.assertEqual(r.returncode, 0, r.stderr)
             text = read(os.path.join(tmp, "methods.md"))
             ms = section(text, "Mass spectrometry")
@@ -159,7 +160,8 @@ class Tags(unittest.TestCase):
 
     def test_captivespray_one_spelling_and_the_column_temperature_default(self):
         with tempfile.TemporaryDirectory() as tmp:
-            text, _ = run_methods(tmp, [make_timstof_d(os.path.join(tmp, "x.d"))])
+            text, _ = run_methods(tmp, [make_timstof_d(os.path.join(tmp, "x.d"))],
+                                  "--acquired-at-core")
             prose = section(text, "Liquid chromatography") + section(text, "Mass spectrometry")
             self.assertNotIn("Captive Spray", prose)
             self.assertIn("via a CaptiveSpray ion source", prose)

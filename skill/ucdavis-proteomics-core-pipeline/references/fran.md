@@ -399,7 +399,7 @@ That is honest, not a bug.
 
 **No sidecar at all: read the FASTA the search names** (`fasta_from_search`). A search whose
 FASTA has no sidecar (a hand-run DIA-NN, or `MRS/UP000005640_9606_plus_universal_contam.fasta`
-behind the Siegel searches) still says exactly which database it read: `fasta` in
+behind some older Core searches) still says exactly which database it read: `fasta` in
 `search_provenance.json`, or `--fasta` in its `report.log.txt`. The log is read the way DIA-NN
 reads its own arguments (logged unquoted; a value runs to the next `--`), so a path with spaces,
 such as `Universal Protein Contaminants.fasta`, is kept whole. That file then supplies

@@ -115,7 +115,8 @@ write_repro_script <- function(path,
   if (!is_dpc && is.null(between_run))
     stop("write_repro_script: a maxlfq script needs the run's between-run step -- its ",
          "descriptor's between_run (build_maxlfq.R, 2.14.2 and later) or between_run = ",
-         "\"none\" | \"quantile\" | \"median\"; it is never guessed", call. = FALSE)
+         "\"none\" | \"quantile\" | \"median\" | \"median_ratio\"; it is never guessed",
+         call. = FALSE)
   # The contaminant step, emitted from the record so the script removes exactly what the
   # run removed -- a script that kept them would reproduce a different analysis.
   cont_on  <- isTRUE(contaminants$removed)
@@ -295,9 +296,11 @@ write_repro_script <- function(path,
       "E <- y_protein$E",
       "")
   } else {
+    medpolish_on <- identical(descriptor$pipeline_id, "peptide_medpolish") &&
+      !is.null(descriptor$rollup_feature)
     sel <- unique(c("Run", "Protein.Group", "PG.MaxLFQ", q_columns, ann_cols,
                     if (eq_on) "Empirical.Quality", if (pgq_on) "PG.MaxLFQ.Quality",
-                    cont_col))
+                    cont_col, if (medpolish_on) descriptor$rollup_feature))
     # Per-column cutoffs, same as the dpc branch above. build_maxlfq() applies
     # diann_cutoff_for() per column, so emitting the scalar --q-cutoff for all of
     # them produced a script that ran clean and returned different results than
@@ -331,9 +334,23 @@ write_repro_script <- function(path,
               else "max(PG.MaxLFQ) over the report's rows",
               switch(between_run, quantile = "; quantile-normalise",
                      median = "; median-centre each run",
+                     median_ratio = "; median-ratio centre each run",
                      if (identical(descriptor$quantities, "raw"))
                        "; NOT normalised (--quantities raw: a --no-norm report)"
                      else "; no between-run step here")),
+      if (medpolish_on) c(
+      "# each protein: Tukey median polish of its peptides' log2 values (peptides x runs)",
+      "rows <- rows[is.finite(log2(rows$PG.MaxLFQ)), ]",
+      "runs <- sort(unique(rows$Run))",
+      "E <- t(vapply(split(rows, rows$Protein.Group), function(pr) {",
+      sprintf("  m <- tapply(log2(pr$PG.MaxLFQ), list(pr[[%s]], factor(pr$Run, levels = runs)), max)",
+              .rq(descriptor$rollup_feature)),
+      "  if (nrow(m) == 1) return(m[1, ])",
+      "  mp <- stats::medpolish(m, na.rm = TRUE, trace.iter = FALSE)",
+      "  v <- mp$overall + mp$col; v[colSums(is.finite(m)) == 0] <- NA_real_; v",
+      "}, numeric(length(runs))))",
+      "colnames(E) <- runs")
+      else c(
       "pg_run <- rows |>",
       "  dplyr::group_by(Protein.Group, Run) |>",
       "  dplyr::summarise(PG.MaxLFQ = max(PG.MaxLFQ, na.rm = TRUE), .groups = 'drop') |>",
@@ -342,18 +359,29 @@ write_repro_script <- function(path,
       "                           names_from = Run, values_from = PG.MaxLFQ)",
       "E <- as.matrix(wide[, -1, drop = FALSE]); rownames(E) <- wide$Protein.Group",
       "E[E <= 0 | !is.finite(E)] <- NA_real_",
-      "E <- log2(E)",
+      "E <- log2(E)"),
       "E <- E[, colSums(is.finite(E)) >= 2, drop = FALSE]   # drop runs with <2 proteins",
       switch(between_run,
              quantile = "E <- limma::normalizeBetweenArrays(E, method = 'quantile')",
              median = c("cm <- apply(E, 2, stats::median, na.rm = TRUE)   # each run's median log2",
                         "E <- sweep(E, 2, cm - stats::median(cm, na.rm = TRUE))"),
+             median_ratio = c(
+               "# each run's median log2 ratio to the protein's median across runs, over the",
+               "# proteins quantified in every run (or, with fewer than 50, in at least half)",
+               "full <- rowSums(is.finite(E)) == ncol(E)",
+               "use <- if (sum(full) >= 50) full else rowSums(is.finite(E)) >= max(2, ceiling(ncol(E) / 2))",
+               "X <- E[use, , drop = FALSE]",
+               "E <- sweep(E, 2, apply(X - apply(X, 1, stats::median, na.rm = TRUE), 2, stats::median, na.rm = TRUE))"),
              if (!is.null(br_why)) sprintf("# no between-run step: %s", br_why)),
       "",
-      sprintf("# --- 3. Coverage filter: a protein must be quantified in >= %.0f%% of samples",
-              100 * cov_min_frac),
-      sprintf("min_obs <- max(2, ceiling(%s * ncol(E)))", .rnum(cov_min_frac)),
-      "E <- E[rowSums(!is.na(E)) >= min_obs, , drop = FALSE]",
+      sprintf(paste("# --- 3. Coverage filter: quantified in >= %.0f%% (at least 2) of all samples, or of",
+                    "the runs of any one group"), 100 * cov_min_frac),
+      "cov_groups <- metadata$Group[match(colnames(E), metadata$File.Name)]",
+      sprintf("frac <- %s", .rnum(cov_min_frac)),
+      "keep <- rowSums(!is.na(E)) >= max(2, ceiling(frac * ncol(E)))",
+      "for (g in unique(cov_groups))",
+      "  keep <- keep | rowSums(!is.na(E[, cov_groups == g, drop = FALSE])) >= max(2, ceiling(frac * sum(cov_groups == g)))",
+      "E <- E[keep, , drop = FALSE]",
       "")
   }
 

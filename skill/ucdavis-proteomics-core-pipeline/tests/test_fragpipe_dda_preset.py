@@ -757,18 +757,21 @@ class SharedDigest(unittest.TestCase):
 # sha256 of the outputs at 2f9b229c (computed there, 2026-11-04): cfg bytes, and the rationale /
 # provenance JSON without its path (None: it holds an override's role, which depends on the host)
 BASE_PINS = {
-    "sage_timstof_dda": ("d9aba374e515151a85fa185b8510892cd37f52b152c8b61da63f7a6ead9b6ad1",
-                         "148ebb83670f6ee3b8e65fb8454b7dc01d12615efd150df2ca307aced666bb54"),
-    "sage_timstof_ids": ("b180190f56aed00e95a0041c909fc25589ca52d3140e3abdf315de2296fc6ad5",
-                         "970e2dcdc676f0dea89ec61de7dc46fd64faf80b4e3ec5dd2f90d37209b4b210"),
-    "sage_lumos_itms": ("acb91e9a285bec5d26e79b624e0b0a5089b61cb4dd532f57d171f57a358187db",
-                        "604e7e8c3741c6ca2e5f8f9dea5c33cda751f067bf2497a50c0e3848525bd190"),
-    "sage_varmods_nocys": ("00849802bff3d785aa8eb92c10949d9a3291e18e4b2c6b06d0f454cf0641b8c7",
-                           "a78db1e3ba15f2986c79639cab364708e985fc2a02c4db44b19532a039bce108"),
-    "sage_nonspecific_override": (
-        "9175d65d9abcf81f44bb03ecb86b3e9084b0c2bc88790b42cf4b6c792d9338f5", None),
-    "sage_astral_dia": ("4ae1789d2c2fdc0a77f211cab22a54f061ba64f5a38e58ea8482720db4ed87fc",
-                        "b4fc8cde0cffa4a6e672a0f5c0e156db02ac222f23126af3d8d196bb9d8c8ce7"),
+    # Sage re-pinned 2.15.1 (follow-up): the dda lane's 0e99e604 changed the cfg on purpose --
+    # chimera off (it needs report_psms > 1), max_fragment_charge 1 for high-res MS2 (ion trap
+    # stays 2), and the enzyme/charge/chimera rationale text. Only those fields differ from 2f9b229c.
+    "sage_timstof_dda": ("2c1277a529797802a175a6b17e44488d8d3fe909c0c4a1551341ddef8c3ca7dd",
+        "39fda83f8259a509b7e2de54f21b62cf0ce80d80cbfa083236227ef8b6a4ed24"),
+    "sage_timstof_ids": ("d0eb6fc08fa1636523d3192822b87d24be415fe3883872ec09e7657f9d70c9bd",
+        "bfb030469944e42bc988c37f6c8c5b43937b52a4d0da841b84ca5760125d6b4c"),
+    "sage_lumos_itms": ("6402f5805d227fab3c29f72cedb0ad273407ccd96baafc84bd1162ef6ef31afb",
+        "aa5f54ef731631bf9079a521a56fc44e0e6907fa5d085c187e8f1aff0ad6779e"),
+    "sage_varmods_nocys": ("28ff76cc7755575017facc1217c5e8c598a69b9e36f3e07696016627465deb45",
+        "4ab5b7f17b74a69695ff16e6e0cf09c5f01f975cc83f1f14ee120bdf37a6376c"),
+    "sage_nonspecific_override": ("08bc41a84ae52fb6a31091740eecd948aa4bb6792776ba0524a787c6a61e63ce",
+        None),
+    "sage_astral_dia": ("a670507cda2f954a486a5172ccc54be016c6b6fded5c8c1debf661f867d9e93c",
+        "80c531a287fe878d22dd3f05f75b702ebdca8f7f2b97e57fa8b281dbc131fb85"),
     "fp_timstof_dia": ("cf67a668b01dce364f677b8b936a0575f4eec2036df17fa4b0fced96c49b4c1b",
                        "41ba51aa37beb8253484cd553b78fac3e0c121bee0c8efb63d741a52fb519f8e"),
     "fp_orbitrap_dia": ("09e11fd2192ccf0b98ac514af096863dfcdc41df5d420726c320967233470793",
@@ -777,9 +780,11 @@ BASE_PINS = {
                           "710922462203510e0f40737fd17c497670e4a99f81546680596c4bb480f2be06"),
     "fp_orbitrap_ppm": ("5dd05f014375a9630d3df4500210ffa1ab661495631be9314c6266acdf4db660", None),
     "radiant_astral": ("3e0f0ff2b45b468287e50f7961d7bfeda4a6dd7d717e6db0582a2d58925ca343",
-                       "8a37f92eb18e4409c74c49ab7d6c46ddbddb6be03384b6491181a1b7d1749b27"),
+                       # sidecar re-pinned 2.15.1: + route_status, widths tagged UNVALIDATED
+                       # (audit 2026-11-17 L1-3); the cfg bytes are unchanged
+                       "28717ea5e98688f2db94292a16b190310e68ac9829552b2f4a2c01b925de463e"),
     "radiant_exploris_res": ("72a8bb62b07145f8fe512cb5a3daf7059c09c9999e69609aafd3d77695b78df2",
-                             "aacf44404e888a45a623acf6d2f06e543d3771596304984922f071e4122a4257"),
+                             "28030a90234b4a34c86a4d633a8ba32989a1da57a6d95fb8807651af3d8b4f2f"),
 }
 SAGE = {
     "sage_timstof_dda": ["--engine", "sage", "--acquisition", "DDA", "--instrument", TIMS],

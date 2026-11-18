@@ -53,7 +53,10 @@ TRYPTIC_TEXT = (
     "to 2 missed cleavages, peptide length 7–30 residues. Fixed modifications: Carbamidomethyl "
     "(C). Variable modifications: Acetyl (Protein N-term); Oxidation (M) (at most 2 per "
     "peptide). Mass tolerances were precursor (MS1) ±10 ppm and fragment (MS2) ±10 ppm. "
-    "Identification FDR: ____ [not recorded — confirm].")
+    "Identification FDR: ____ [not recorded — confirm]. "
+    # 2.15.1 (text lane c01631aa): the Methods cite the software that ran, on every route
+    "Software citations: Sage (Lazear 2023, J Proteome Res 22:3652-3659) "
+    "[10.1021/acs.jproteome.3c00486].")
 
 
 def _json(path, obj):
@@ -217,8 +220,10 @@ class SageLfqFdr(Tmp):
         write_lfq(os.path.join(self.d, "lfq.parquet"))
         run_search.adapt_sage(self.d)
         rec = _load(os.path.join(self.d, "sage_adapt.json"))
+        # 2.15.1: with the shared-peptide rule (no results.sage.parquet here: no protein filter)
         self.assertEqual(rec["methods_sentence"],
-                         sage_lfq_check.methods_sentence(sage_lfq_check.LFQ_Q_MAX))
+                         sage_lfq_check.methods_sentence(sage_lfq_check.LFQ_Q_MAX,
+                                                         shared_rule=run_search.SAGE_SHARED_RULE))
 
     def test_the_identifications_route_is_unchanged(self):
         """(pin) sage_identifications.methods_sentence is quoted as before"""

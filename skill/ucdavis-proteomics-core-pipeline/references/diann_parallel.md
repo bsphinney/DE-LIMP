@@ -11,12 +11,12 @@ here (`diann_parallel.py`), ported faithfully from DE-LIMP's `generate_parallel_
 - 177: Usage
 - 200: CPUs per array task — sized to the queue's per-user cap
 - 274: Parallelizing semi-tryptic / non-specific / InfinDIA searches (`--seed-lib`)
-- 340: Notes
-- 348: Scan window MUST be pinned (not just mass accuracy)
-- 645: Orbitrap mass accuracy with no documented tier: measured with DIA-NN
-- 953: DIA-NN exits 0 on fatal errors — never trust the job state alone
-- 1068: Golden rule 6: never a hand-written engine command
-- 1081: 7. The chain as step 7 runs it: routing, the probe and its fallback
+- 344: Notes
+- 352: Scan window MUST be pinned (not just mass accuracy)
+- 659: Orbitrap mass accuracy with no documented tier: measured with DIA-NN
+- 968: DIA-NN exits 0 on fatal errors — never trust the job state alone
+- 1089: Golden rule 6: never a hand-written engine command
+- 1102: 7. The chain as step 7 runs it: routing, the probe and its fallback
 <!-- /contents -->
 
 ## When it is used — automatic above 5 files
@@ -291,6 +291,10 @@ processes **DDA** (`--dda`, DIA-NN ≥2.3) — confirmed on the UC Davis nail co
 > array task, so one bad file kills only its own task (the chain skips files with no
 > `.quant`) instead of nuking the whole run.
 
+**Maintainers only — never run the hand-written InfinDIA commands below for a user.** They
+record how the route was built and validated; a user's search goes through
+`diann_parallel.py` (`--seed-lib`) and `run_search.py`, which write and record every flag.
+
 **InfinDIA does NOT fan out per-file** like the 5-step chain. Its empirical library
 is built from the whole experiment, so if you split `--pre-search` per file you'd get
 N *different* libraries whose `.quant` files can't be merged. So parallelize in **two
@@ -399,12 +403,13 @@ cannot read `.raw`, no radius is logged, and steps 2–5 wait on `afterok` for e
 
 Only after a radius (and a planned mass accuracy) is measured does step 1b write
 `<out>/params.resolved.cfg` — the cfg plus the measured `--window` (and `--mass-acc` /
-`--mass-acc-ms1`) — so a "resolved" cfg without them never exists unless the probe fell back
-(below); a resubmitted step 1b first removes the previous run's `window.txt`, `massacc.txt`,
+`--mass-acc-ms1`) — so a "resolved" cfg without them never exists (a mass-accuracy-only
+fallback writes the fallback's values; below); a resubmitted step 1b first removes the previous run's `window.txt`, `massacc.txt`,
 `window.json`, fallback record, resolved cfg and probe logs.
 
-**A probe whose own machinery failed no longer fails the chain** (`probe_attempts()`, the one
-definition, shared with the single-shot search's probe). Between 2026-09-29 17:00 and 09-30
+**A probe whose own machinery failed is retried** (`probe_attempts()`, the one
+definition, shared with the single-shot search's probe), and a mass-accuracy-only probe then
+falls back; a window probe does not (2.15.1, below). Between 2026-09-29 17:00 and 09-30
 08:00, 62 of fran-5b's 261 step-1b jobs (24%, on 28 of 56 nodes) died in `run_probe` with
 `OSError: [Errno 116] Stale file handle` at `pending += src.read()`: the probe tailed
 `<workdir>/probe.log` on Flinders NFS through one handle held open for the whole ~20-minute
@@ -424,18 +429,27 @@ DIA-NN run. DIA-NN itself succeeded; afterok then left 183 downstream jobs
   `--budget` ran out) falls back at once — a second attempt from the same budget would hit the
   same limit. Attempt 1's evidence stays as `window.json.attempt1` and its logs as
   `window_probe.attempt1/`;
-- then **`probe_fallback.py`** writes what the search runs with instead and step 1b exits 0:
-  `window.txt` = `auto` (steps 2–5 accept it only with `probe_fallback.json` beside it recording
-  a window fallback — `needs_measured()` — and pass **no** `--window` — `window_flag()` — so
-  DIA-NN chooses the radius per run, exactly what the chain normally prevents), and a planned mass accuracy at the documented level as given and the
-  other at the facility SOP (`estimate_params.SOP_MASS_ACC`, the floor a measured level gets
-  anyway), tagged DEFAULT. `params.resolved.cfg` then has no `--window`, because steps 2–5 ran
-  without one. The record is `<out>/probe_fallback.json` and `search_provenance.json`
-  `probe_fallback`, `scan_window` (`mode: fallback_auto`, `fallback: true`, `value: null`, a
-  source beginning `fallback (probe failed: <reason>)`) and `mass_acc` / `result.mass_acc`
-  (`mode: fallback_default`) — the `mode` values are stable, for FRAN
-  (→ `references/environment.md`); the Methods say the measurement failed and DIA-NN set the
-  window automatically, per run — never that it was measured (DE-LIMP rule 2) — and AUDIT.md
+- **a scan-window probe never falls back (2.15.1).** When step 1b is measuring the radius and
+  the probe's machinery still fails after the retry (or hits its time limit), step 1b **FAILS**
+  with its own message, and steps 2–5 never start (`window_fallback_allowed()`). Up to 2.15.0 it
+  fell back to `window.txt` = `auto`: steps 2–5 then passed no `--window`, each array task's
+  DIA-NN chose its own radius, and steps 3 and 5 reused those `.quant` files. DIA-NN's README:
+  "it is strongly recommended to only reuse .quant files when both mass accuracies and the scan
+  window are fixed to specific values" (audit 2026-11-17, lane 1 #4). There is no radius to fall
+  back to without measuring one, so the chain stops. Recover: re-run `submit.sh` (a failure of
+  the probe's machinery is usually a passing storage or node problem), or pin `--window N` in
+  the cfg — a radius measured on an earlier search with the same LC method, from its
+  `window.json` — and regenerate. Steps 2–5 now refuse a `window.txt` that says `auto`, even
+  beside an old `probe_fallback.json`. `scan_window.mode: fallback_auto` stays a valid value
+  only in records written by 2.15.0 and earlier.
+- when step 1b measures **only mass accuracy** (the cfg pins `--window`), **`probe_fallback.py`**
+  writes what the search runs with instead and step 1b exits 0: the planned mass accuracy at the
+  documented level as given and the other at the facility SOP (`estimate_params.SOP_MASS_ACC`,
+  the floor a measured level gets anyway), tagged DEFAULT — one value for every step. The record
+  is `<out>/probe_fallback.json` and `search_provenance.json` `probe_fallback` and `mass_acc` /
+  `result.mass_acc` (`mode: fallback_default`) — the `mode` values are stable, for FRAN
+  (→ `references/environment.md`); the Methods say the measurement failed — never that it was
+  measured (DE-LIMP rule 2) — and AUDIT.md
   (so the report's Audit & caveats), the report's Results at a glance, the run record's Data
   Quality Notes, `checkpoint.py status`, the Slack post and `watch_run.sh --all` carry a
   CAUTION (`probe_fallback.caution()`). Its `reason` lists any value a run did log before the
@@ -747,9 +761,10 @@ A run that did not is replaced by the next run nearest the median, exactly as a 
 radius is, and what it did log is recorded in `window.json` but never pinned: otherwise the radius
 and the mass accuracy would describe different sets of runs. If no run answers, step 1b fails
 with `FAILED: step 1b measured no scan-window radius and mass accuracy` when DIA-NN finished the
-runs without logging it (3 failures), and falls back (above) only when the probe's own
-machinery failed: the documented MS1 as given, MS2 at the SOP tagged DEFAULT, the window left to
-DIA-NN, `window.json` kept, and `mass_acc` / `result.mass_acc` replaced by the fallback's record
+runs without logging it (3 failures). When the probe's own machinery failed, a probe that was
+measuring the radius too fails step 1b (no window fallback, above); one measuring mass accuracy
+alone (a pinned `--window`) falls back: the documented MS1 as given, MS2 at the SOP tagged
+DEFAULT, `window.json` kept, and `mass_acc` / `result.mass_acc` replaced by the fallback's record
 (`mode: fallback_default`, `measured: false`, `fallback: true`). The earlier `window.txt`,
 `massacc.txt` and `params.resolved.cfg` are deleted before the probe starts, so neither path
 inherits them. The generator's
@@ -802,8 +817,8 @@ nothing when the file is missing, and DIA-NN then optimises mass accuracy per fi
 writes a `.quant`, so `must_exist` passes. Step 1b deletes the file before probing, and
 `references/watcher.md` resubmits the downstream steps of a stalled chain, so this is reachable
 (review reproduction: `step2_firstpass.sbatch` after a failed step 1b ran DIA-NN with no
-mass-accuracy flag). Each of steps 2–5 now checks that `window.txt` holds a positive integer (or `auto`, the
-fallback) and
+mass-accuracy flag). Each of steps 2–5 now checks that `window.txt` holds a positive integer (skill ≤ 2.15.0's `auto`
+fallback is refused) and
 `massacc.txt` holds the two flags before anything else, and names step 1b when either does not.
 (Steps 2–5 of the *same* submission are `afterok` on a failed step 1b and never start; this is
 for the resubmission, which must run step 1b again before them.)
@@ -968,10 +983,16 @@ exits 0 having written nothing leaves the old file for the check to find. Reprod
 DIA-NN 2.7.0 (in a review run on HIVE): a re-run with no .NET logged `ERROR: cannot read
 .raw files`, exited 0, and left the previous `report.parquet` byte-identical.
 
+The other way round matters too: a DIA-NN that crashes, is killed or hits a container error
+can exit non-zero having written a partial file that passes the check. From 2.15.1 every
+DIA-NN call in steps 1-5 records its exit status (`engine_call()`); a non-zero status prints
+`FAILED: DIA-NN exited with status N ...`, deletes that step's artefact and fails the step
+before the artefact check runs. Both checks are needed.
+
 | step | deletes first | asserts |
 |---|---|---|
 | 1 | `step1.predicted.speclib` | the predicted spectral library exists and is non-empty |
-| 1b (window measured) | `window.txt`, `window.json`, `params.resolved.cfg` and its `.tmp` (and, when it fell back, `probe_fallback.json`) | a positive-integer radius was measured -- or the probe measured nothing twice and fell back to `auto` -- and `window.txt` and `params.resolved.cfg` are non-empty regular files |
+| 1b (window measured) | `window.txt`, `window.json`, `params.resolved.cfg` and its `.tmp`, `probe_fallback.json` | a positive-integer radius was measured (a probe that measured nothing fails the step: there is no window fallback) and `window.txt` and `params.resolved.cfg` are non-empty regular files |
 | 2 | this task's `quant_step2/<run>.quant` | this task's `.quant` was written to `quant_step2/` |
 | 3 | `empirical.parquet` | the empirical spectral library exists |
 | 4 | this task's `quant_step4/<run>.quant` (before the no-step-2-quant skip) | this task's `.quant` was written to `quant_step4/` |
@@ -1152,24 +1173,22 @@ runs give no radius; default 3).
       (a cohort that is mostly washes) and when the measured radii differ by more than 2. It never probes just the first file:
       DIA-NN's README warns auto-optimised values "depend on which run is first in the
       list". Once a radius (and a planned mass accuracy) is measured it writes
-      `<out>/params.resolved.cfg`. **Only when the probe's own machinery failed** — it
-      could not read its own DIA-NN log (an I/O error, e.g. an NFS `Stale file handle`), it
-      crashed, or the runs hit its time limit — does step 1b go on without a measurement: it
-      **retries** a crash or an unreadable log **once** in the same job, and if that fails too
-      (or at once, for a time limit) it **falls back** instead of failing the chain:
-      `window.txt` says `auto` (steps 2–5 accept it only beside `probe_fallback.json`, and pass
-      no `--window`, so DIA-NN chooses the radius per run), a planned mass accuracy is the
-      documented level plus the facility SOP for the other (tagged DEFAULT), and it exits 0
-      so steps 2–5 run. It is recorded as a fallback — `<out>/probe_fallback.json`,
-      `search_provenance.json` `probe_fallback` / `scan_window` — and the Methods say the
-      measurement failed and DIA-NN set the window itself; AUDIT.md (the report's Audit &
-      caveats), the report's Results at a glance, the run record, `watch_run.sh --all`,
-      `checkpoint.py status` and the Slack post carry a CAUTION; `scan_window.mode` is
-      `fallback_auto` (a stable value FRAN reads — `references/environment.md`). **Tell the
-      user** when a search fell back (the job log says `FALLBACK`), and why
-      (`probe_fallback.json` `reason`, which also lists any value a run did log):
-      per-run windows are what the chain normally exists to avoid, so re-run the chain if
-      the reason was transient (an NFS `Stale file handle`). Before 2.9 a failed probe failed
+      `<out>/params.resolved.cfg`. When the probe's own machinery fails — it could not read
+      its own DIA-NN log (an I/O error, e.g. an NFS `Stale file handle`), it crashed, or the
+      runs hit its time limit — step 1b **retries** a crash or an unreadable log **once** in
+      the same job. If that fails too (or at once, for a time limit), **a window measurement
+      fails step 1b** (2.15.1): with no pinned radius every run would choose its own window and
+      steps 3 and 5 would mix them, which DIA-NN strongly advises against. The job log says
+      how to recover (re-run `submit.sh`, or pin `--window N` from an earlier search with the
+      same LC method). Only a probe that measures **mass accuracy alone** (the cfg pins
+      `--window`) still falls back: the documented level plus the facility SOP for the other
+      (tagged DEFAULT), one value for every step, recorded in `<out>/probe_fallback.json` and
+      `search_provenance.json` `probe_fallback` / `mass_acc`, with a CAUTION in AUDIT.md, the
+      report, the run record, `watch_run.sh --all`, `checkpoint.py status` and the Slack post.
+      **Tell the user** when a search fell back (the job log says `FALLBACK`), and why
+      (`probe_fallback.json` `reason`). Up to 2.15.0 a window probe fell back to `auto`
+      (`scan_window.mode` `fallback_auto`, still a stable value FRAN reads in old records —
+      `references/environment.md`). Before 2.9 a failed probe failed
       step 1b and left steps 2–5 `DependencyNeverSatisfied` (fran-5b, 2026-09-30: 62 of 261
       jobs, over an `ESTALE` in the probe's log tail on Flinders NFS; the live log is now on
       node-local storage). **Everything else still fails step 1b**, never retried or fallen

@@ -59,6 +59,20 @@ class Declared(unittest.TestCase):
                 self.assertIn(words, dec["engine_normalisation"])
         self.assertIn("[confirm]", dec["engine_normalisation"])
 
+    def test_the_flag_the_between_run_rule_reads(self):          # 2.15.1, audit L2-3
+        for line, flag in (("ionquant.normalization=1\n", "true"),
+                           ("ionquant.normalization=0\n", "false"), ("", None)):
+            with self.subTest(line=line):
+                self.workflow(line)
+                dec = run_search.fragpipe_quantity_declaration(self.d, MAXLFQ3)
+                self.assertEqual(dec["engine_normalised"], flag)
+        for frozen, flag in ((FROZEN_2_1_2, "true"), (FROZEN_2_0_1, None)):
+            with self.subTest(flag=flag):
+                with open(os.path.join(self.d, "frozen_config.yaml"), "w") as fh:
+                    fh.write(frozen)
+                dec = run_search.alphadia_quantity_declaration(self.d, "pg.matrix.parquet")
+                self.assertEqual(dec["engine_normalised"], flag)
+
     def test_alphadia_as_its_frozen_config_says(self):
         for frozen, words in ((FROZEN_2_1_2, "directLFQ's between-run normalisation "
                                              "(search_output.normalize_directlfq: true"),

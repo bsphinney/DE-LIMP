@@ -66,9 +66,10 @@ class DeepMerge(NoStaffList):
 
     def test_a_mod_override_adds_to_the_mods_it_lands_on(self):
         base, _ = sage({})
-        cfg, _ = sage({"database": {"variable_mods": {"S": [79.9663]}}})
+        # tryptophan oxidation: a site-level PTM (phospho, K-GG) is refused here since 2.15.1
+        cfg, _ = sage({"database": {"variable_mods": {"W": [15.9949]}}})
         self.assertEqual(cfg["database"]["variable_mods"],
-                         dict(base["database"]["variable_mods"], S=[79.9663]))
+                         dict(base["database"]["variable_mods"], W=[15.9949]))
 
     def test_a_list_is_replaced_not_appended(self):
         """(pin) a list value replaces, as the top-level merge already did."""
@@ -112,9 +113,9 @@ class TheRationaleReadsTheFinalCfg(NoStaffList):
                          "Sage's restrict 'P' is trypsin, not trypsin/P")
 
     def test_a_mod_override_shows_the_merged_mods(self):
-        cfg, r = sage({"database": {"variable_mods": {"S": [79.9663]}}})
+        cfg, r = sage({"database": {"variable_mods": {"W": [15.9949]}}})
         self.assertEqual(r["variable_mods"]["value"], cfg["database"]["variable_mods"])
-        self.assertIn("user override: database.variable_mods.S", r["variable_mods"]["source"])
+        self.assertIn("user override: database.variable_mods.W", r["variable_mods"]["source"])
 
     def test_a_quant_override_shows_the_final_lfq(self):
         cfg, r = sage({"quant": {"lfq": False}})
@@ -203,7 +204,7 @@ class AKeyAtTheWrongLevelIsRefused(NoStaffList):
         for over, where in (({"enzyme": {"cleave_at": "K"}}, "database.enzyme"),
                             ({"lfq": False}, "quant.lfq"),
                             ({"static_mods": {"C": 0}}, "database.static_mods"),
-                            ({"variable_mods": {"S": [79.9663]}}, "database.variable_mods"),
+                            ({"variable_mods": {"W": [15.9949]}}, "database.variable_mods"),
                             ({"database": {"cleave_at": "K"}}, "database.enzyme.cleave_at"),
                             ({"missed_cleavages": 1}, "database.enzyme.missed_cleavages")):
             msg = self.refused(over)

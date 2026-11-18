@@ -299,7 +299,7 @@ class OneTable(unittest.TestCase):
         self.assertEqual({(e, a): ec.de_method(e, a) for e in ("diann", "radiant", "sage", "fragpipe")
                           for a in ("DIA", "DDA")},
                          {("diann", "DIA"): "dpc", ("diann", "DDA"): "dpc",
-                          ("radiant", "DIA"): "dpc", ("radiant", "DDA"): "dpc",
+                          ("radiant", "DIA"): "maxlfq", ("radiant", "DDA"): "maxlfq",
                           ("sage", "DIA"): "maxlfq", ("sage", "DDA"): "maxlfq",
                           ("fragpipe", "DIA"): "dpc", ("fragpipe", "DDA"): "maxlfq"})
 
