@@ -1,19 +1,15 @@
 {
-  "updated_at": "2026-11-17T15:42:15+00:00",
+  "updated_at": "2026-11-18T15:21:51+00:00",
   "github": {
-    "clones_14d": 351,
-    "unique_users_14d": 126,
-    "views_14d": 78,
-    "unique_visitors_14d": 31,
+    "clones_14d": 431,
+    "unique_users_14d": 158,
+    "views_14d": 69,
+    "unique_visitors_14d": 33,
     "stars": 22,
     "forks": 1
   },
   "trends": {
     "clones": [
-  {
-    "date": "2026-11-03",
-    "count": 14
-  },
   {
     "date": "2026-11-04",
     "count": 11
@@ -65,13 +61,13 @@
   {
     "date": "2026-11-16",
     "count": 17
+  },
+  {
+    "date": "2026-11-17",
+    "count": 49
   }
 ],
     "views": [
-  {
-    "date": "2026-11-03",
-    "count": 3
-  },
   {
     "date": "2026-11-04",
     "count": 3
@@ -123,6 +119,10 @@
   {
     "date": "2026-11-16",
     "count": 2
+  },
+  {
+    "date": "2026-11-17",
+    "count": 5
   }
 ]
   },
