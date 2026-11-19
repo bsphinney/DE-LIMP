@@ -531,6 +531,19 @@ class MovedRepository(Harness):
                          f"plugin marketplace add {self.new_url} && claude plugin install {ID}")
         self.assertNeverCurrent(j["say"])
 
+    def test_the_check_says_the_skill_moved_when_the_version_is_current(self):
+        """A 2.14 copy updated to 2.15.0 from the old repository, then /reload-plugins: the check
+        found nothing to update and said nothing, so the catalogue stayed on the old repository."""
+        self.old_laptop(old="2.15.0", main="2.15.0")
+        j = self.sv(0, "--check-update", **self.urls())
+        self.assertEqual((j["status"], j["behind_main"], j["moved"], j["next"]),
+                         ("current", False, True, None))
+        self.assertIn("moved to its own repository", j["say"])
+        self.assertIn("still points at the old one", j["say"])
+        self.assertIn("bash scripts/skill_version.sh --session-start", j["say"])
+        self.assertIn("when no analysis is under way", j["say"])
+        self.assertEqual(self.origin(), self.old_url, "the check itself moves nothing")
+
     def test_update_moves_the_catalogue_and_installs_main(self):
         self.old_laptop()
         j = self.sv(0, "--update", **self.urls())
@@ -582,12 +595,6 @@ class MovedRepository(Harness):
                          ("updated", "2.15.0", "not_needed", True))
         self.assertEqual(self.origin(), self.old_url)
         self.assertEqual(self.updates(), [f"plugin update {ID} PREFER_HTTPS=1"])
-
-    def test_in_step_on_the_old_catalogue_says_nothing(self):
-        self.old_laptop(old="2.15.0", main="2.15.0")
-        j = self.sv(0, "--check-update", **self.urls())
-        self.assertEqual((j["status"], j["moved"], j["say"], j["next"]),
-                         ("current", True, None, None))
 
     def test_every_spelling_of_the_old_address_is_the_old_repository(self):
         """The defaults (no SKILL_OLD_REPO_URL): DE-LIMP by HTTPS, SSH, any case, with or

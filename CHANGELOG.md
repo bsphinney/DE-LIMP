@@ -1,5 +1,9 @@
 # Changelog
 
+## [Skill 2.15.1] — 2026-11-19
+
+- **The update check says when this computer still updates from DE-LIMP.** Before, a 2.14 copy that updated to 2.15.0 and then ran `/reload-plugins` was told nothing: `skill_version.sh --check-update` found the version current, returned `"moved": true` with no message, and the plugin catalogue stayed on this repository until a new session started. Now its `say` names the skill's own repository (https://github.com/bsphinney/UCD-Proteomics-AI-Skill) and the command that moves the catalogue (`skill_version.sh --session-start`). The check itself still changes nothing. This repository's `skill/` folder carries 2.15.1 so that a computer still on 2.14 gets the fix with its update.
+
 ## [Skill 2.15.0] — 2026-11-12
 
 2.15 does five big things and then fixes what real data showed.

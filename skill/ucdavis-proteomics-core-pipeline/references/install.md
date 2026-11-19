@@ -67,7 +67,7 @@ that was seen to work.
 **Installed before 2.15 (from DE-LIMP)?** Up to 2.15 the skill was in
 `https://github.com/bsphinney/DE-LIMP.git`; from 2.15 it has its own repository,
 `https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git`. The marketplace name and the plugin name are unchanged.
-A computer that added the old address gets 2.15.0 from it as usual, and 2.15.0 moves the
+A computer that added the old address gets 2.15.1 from it as usual, and that moves the
 catalogue to the new address by itself at the start of its first session (step 0's
 `--session-start`, `references/access.md`, "The move"). It skips the move, and gives this line,
 when the new address does not answer, git or claude is missing, or it runs in Claude Desktop

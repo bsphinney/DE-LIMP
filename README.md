@@ -54,8 +54,8 @@ git -C ~/.claude/plugins/marketplaces/ucdavis-proteomics-core pull --ff-only
 ```
 
 **Installed the skill from here before 2.15?** Nothing to do. The `skill/` folder and
-`.claude-plugin/marketplace.json` stay in this repository on purpose, at 2.15.0, so that older
-installs can still update from here. 2.15.0 then moves your plugin catalogue to the new repository
+`.claude-plugin/marketplace.json` stay in this repository on purpose, at 2.15.1, so that older
+installs can still update from here. The skill then moves your plugin catalogue to the new repository
 by itself at the start of its first session. Please do not delete `skill/` or `.claude-plugin/`
 from DE-LIMP: an install from before 2.15 would stop getting updates.
 
