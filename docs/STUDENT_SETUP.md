@@ -134,7 +134,7 @@ If something in the pipeline seems fixed for everyone else but not for you, upda
 
 **Installed before 2.15?** Up to 2.15 the skill lived in `https://github.com/bsphinney/DE-LIMP.git`; from 2.15
 it has its own repository, `https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git` (same marketplace and plugin
-names). You get 2.15.0 from the old address as usual, and 2.15.0 moves your catalogue to the new
+names). You get 2.15.1 from the old address as usual, and it moves your catalogue to the new
 one by itself when a session starts, and tells you. If it could not (offline, or in Claude
 Desktop), do it yourself, in a terminal (one line), then `/reload-plugins`:
 
