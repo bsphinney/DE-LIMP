@@ -26,8 +26,8 @@ jobs** on HIVE — nothing depends on an interactive session staying open.
 - 463: On HIVE: the login node or a compute node (golden rule 3, step 0a)
 - 512: Step 0a: the questions, the check and the modes
 - 591: Step 0: is this skill current? (every conversation)
-- 734: Step 1: locating the raw files
-- 739: Step 1: a path the user gave on a network drive
+- 735: Step 1: locating the raw files
+- 740: Step 1: a path the user gave on a network drive
 <!-- /contents -->
 
 ## Step 0a asks two questions (Core staff, three) → pick a mode
@@ -682,7 +682,8 @@ Then **ask whether to update now**:
   repository's main. A catalogue cloned from DE-LIMP cannot be pulled to it (the histories are
   unrelated), so 2.15.0 moves it at the start of its first session, at the same version
   (`--session-start`; `--check-update` alone never moves, so nothing moves in the middle of an
-  analysis), and `--update` moves it when it is behind `main`. Both use the same steps: check
+  analysis: on such a catalogue at the current version its `say` names the move and the
+  `--session-start` that does it, so relay it and run that once the analysis allows), and `--update` moves it when it is behind `main`. Both use the same steps: check
   that the new address answers, then run
   `claude plugin marketplace remove ucdavis-proteomics-core && claude plugin marketplace add https://github.com/bsphinney/UCD-Proteomics-AI-Skill.git && claude plugin install ucdavis-proteomics-core-pipeline@ucdavis-proteomics-core`.
   Both outputs say `moved: true` for such a catalogue; `refresh: moved` when it was moved. If the

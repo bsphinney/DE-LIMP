@@ -81,7 +81,8 @@
 #   reinstalls, so the computer is where it was. "moved" in both outputs says the catalogue
 #   is the old one; refresh "moved" / "move_failed" says what --update did.
 #   2.15.0 itself moves it, at once: --session-start (never --check-update, which stays read-only
-#   for the checks in the middle of an analysis) runs the same sv_move when the catalogue is the
+#   for the checks in the middle of an analysis; on an old catalogue at the current version its
+#   `say` names the move and the --session-start that does it) runs the same sv_move when the catalogue is the
 #   old one, at any version, before its checks, and says so in one sentence ("move"). It never
 #   runs on a catalogue that is already the new one, so it cannot repeat: once moved, the
 #   catalogue's origin is the new address. Skipped, with the by-hand line, when the new address
@@ -878,7 +879,10 @@ SH
         state="$(skill_update_state "$here" "$MAIN" "$inst")"
       fi
       case "$state" in
-        current) status=current; code=0; behind=false ;;
+        current) status=current; code=0; behind=false
+          # current, but the catalogue is still the old repository's (a 2.14 copy updated from
+          # it, then /reload-plugins: no session start ran): say so, the check itself moves nothing
+          [ "$moved" != true ] || say="The skill has moved to its own repository (${SKILL_REPO_URL%.git}), but this computer's plugin catalogue still points at the old one (DE-LIMP), where later releases will not appear. It is moved at the start of the next session, or now, when no analysis is under way, with: bash scripts/skill_version.sh --session-start" ;;
         reload_needed)
           status=reload_needed; code=3; behind=true
           say="Skill $inst is installed on this computer, but this session still runs $here: type /reload-plugins (or restart Claude Code), then start again." ;;
